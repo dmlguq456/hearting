@@ -38,6 +38,48 @@ def record(text, last, kind="user", reply=None, turn=None):
     return found
 
 
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fleet.explorer.grid import _terminal_width  # noqa: E402  (the terminal's own width, as the reader counts)
+
+SOURCE = HERE.parent   # what `panel_layout` reads as the scenario's source, for a run of this module's type
+RIGHT = {"folded": False, "side": True, "left": False, "panelColumn": 160, "panelCols": 40}   # 200 x 50, the defaults
+
+
+def cells(text):
+    return sum(_terminal_width(char) for char in text)
+
+
+def fill(text, width):
+    return text + " " * max(0, width - cells(text))
+
+
+def panel_of(*rows, width=40, label="ROUTE", under=()):
+    """A side panel ``width`` cells wide as the shell draws it: its frame, a route box holding ``rows`` (box rows two
+    cells in, the box's borders right inside the frame), then ``under`` (MESSAGES and the like) under the box."""
+    assert all(cells(row) <= width - 8 for row in rows) and all(cells(row) <= width - 4 for row in under), (rows, under)
+    return ["┌" + "─" * (width - 2) + "┐",
+            f"│ ╭─ {label} " + "─" * (width - 12 - len(label)) + " ›─╮ │",
+            *[f"│ │ {fill(row, width - 8)} │ │" for row in rows],
+            "│ ╰" + "─" * (width - 6) + "╯ │",
+            *[f"│ {fill(row, width - 4)} │" for row in under],
+            "└" + "─" * (width - 2) + "┘"]
+
+
+def on_screen(panel, talk=(), cols=200, left=False):
+    """A whole terminal screen: the conversation and the panel two cells apart, the panel on the right (or the left)
+    as ``native-display.cjs`` ``layout`` puts it; the bottom layout's panel (as wide as the window) under the talk."""
+    width = cells(panel[0])
+    if width >= cols:
+        return "\n".join([*talk, *panel])
+    native = cols - width - 2
+    out = []
+    for at in range(max(len(panel), len(talk))):
+        said = talk[at] if at < len(talk) else ""
+        shown = panel[at] if at < len(panel) else ""
+        out.append((fill(shown, width) + "  " + said) if left else (fill(said, native) + "  " + shown))
+    return "\n".join(row.rstrip() for row in out)
+
+
 class RegistrationTest(unittest.TestCase):
     def test_the_scenarios_load_and_are_listed(self):
         hb._load_extra()
@@ -216,43 +258,41 @@ class HostRunR2Test(ScriptedModelTest):
 
     def test_s5_only_the_route_boxs_request_line_counts_not_messages_or_conversation(self):
         n = self.nonce
-        screen = "\n".join([
-            f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa      │ MESSAGES │",
-            f"  conversation → [67] {n} claude · 01:02 · delivered                              │ → [67] claude · 01:02 · delivered │",
-            f"                                                              │ │ → [67] 검토 제목 {n} · open │ │",
-            f"                                                              │ │ ◂ [df] 다른 제목 · open │ │",
-            f"                                                              │ │ ✓ [67] 검토 제목 {n} · final │ │",
-        ])
+        panel = panel_of(f"→ [67] 검토 제목 {n} · open", "← [df] 다른 제목 · open", f"✓ [67] 검토 제목 {n} · final",
+                         # 11-27: a received message wears the same `←` as a received request; MESSAGES is under the box.
+                         under=["MESSAGES                         ›", f" ← [67] 검토 제목 {n} · open",
+                                f" → [67] 검토 제목 {n} · final"])
+        screen = on_screen(panel, [f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa",
+                                   f"  conversation │ │ ← [67] 검토 제목 {n} · open │ │ quoted by the agent"])
         title = f"검토 제목 {n}"
-        self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕"),
+        self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕", layout=RIGHT),
                          [f"→ [67] 검토 제목 {n} · open", f"✓ [67] 검토 제목 {n} · final"])
-        self.assertEqual(cases.panel_request_lines(screen, title, "◂"), [])
-        self.assertEqual(cases.panel_request_lines(screen, "zzzzzz", "→✓✕"), [])
+        self.assertEqual(cases.panel_request_lines(screen, title, "←", layout=RIGHT), [])
+        self.assertEqual(cases.panel_request_lines(screen, "zzzzzz", "→✓✕", layout=RIGHT), [])
 
     def test_s8_a_title_cut_on_a_narrow_panel_is_still_found_by_its_front_part(self):
-        # The real r3 screens' request line (host-run r3, request-flow, panel width 38): the nonce is
-        # cut off with the title's end, so the line is found by the recorded title's front part.
-        closed = "│ │ ✓ 검토 제목 1c09… · final answer │ │"
-        other = "│ │ ✓ 다른 제목 1c09… · final answer │ │"
-        screen = "  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐\n" + closed + "\n" + other
-        self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕"),
+        # The real r3 screens' request line (host-run r3, request-flow): the nonce is cut off with the title's end, so
+        # the line is found by the recorded title's front part. The r3 panel stood at column 160 of 200.
+        talk = ["  ▐▛███▛█   Claude Code"]
+        screen = on_screen(panel_of("✓ 검토 제목 1c09… · final answer", "✓ 다른 제목 1c09… · final answer"), talk)
+        self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕", layout=RIGHT),
                          ["✓ 검토 제목 1c09… · final answer"])
-        self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "◂"), [])
-        pad = " " * 160  # row 9 of the r3 screens, whole (the left pane is blank there)
-        real_closed = pad + "│ │ ✓ 검토 제목 1c09… · final answer │ │"
-        real_receiver = pad + "│ │ ◂ 검토 제목 1c… · partial answer │ │"
-        self.assertEqual(cases.panel_request_lines(real_closed, ["검토 제목 1c0908"], "→✓✕"),
-                         ["✓ 검토 제목 1c09… · final answer"])
-        self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "◂"),
-                         ["◂ 검토 제목 1c… · partial answer"])
-        # With the other session's tag and a cut title: `◂ [b1] 검토 제목 9036… · open`.
-        opened = "│ │ ◂ [b1] 검토 제목 9036… · open │ │"
-        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "◂"),
-                         ["◂ [b1] 검토 제목 9036… · open"])
-        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "◂"), [])
+        self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "←", layout=RIGHT), [])
+        self.assertTrue(all(row[:160].strip() in ("", talk[0].strip()) for row in screen.splitlines()), screen)
+        receiver = on_screen(panel_of("← 검토 제목 1c… · partial answer"))
+        self.assertEqual(cases.panel_request_lines(receiver, ["검토 제목 1c0908"], "←", layout=RIGHT),
+                         ["← 검토 제목 1c… · partial answer"])
+        # With the other session's tag and a cut title: `← [b1] 검토 제목 9036… · open`.
+        opened = on_screen(panel_of("← [b1] 검토 제목 9036… · open"))
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "←", layout=RIGHT),
+                         ["← [b1] 검토 제목 9036… · open"])
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "←", layout=RIGHT), [])
         # A whole title and a state with a long word.
-        whole = "│ │ → [6e] 짧은 일 · partial answer │ │"
-        self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→"), ["→ [6e] 짧은 일 · partial answer"])
+        whole = on_screen(panel_of("→ [6e] 짧은 일 · partial answer"))
+        self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→", layout=RIGHT), ["→ [6e] 짧은 일 · partial answer"])
+        # Outside a route box the same row is not a request line.
+        boxless = on_screen(["┌" + "─" * 38 + "┐", "│ │ ✓ 검토 제목 1c09… · final answer │ │", "└" + "─" * 38 + "┘"])
+        self.assertEqual(cases.panel_request_lines(boxless, ["검토 제목 1c09d3"], "→✓✕", layout=RIGHT), [])
 
     def test_s7_the_handoff_steward_runs_under_the_environment_the_shared_resolver_reads(self):
         import dispatch_parent_completion as parent
@@ -271,6 +311,225 @@ class HostRunR2Test(ScriptedModelTest):
             found = subprocess.run([sys.executable, "-I", "-c", script, str(HERE / "peer-steward.py")],
                                    env={**env, "PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=60)
             self.assertEqual(found.stdout.strip(), str(("sid-successor-1", harness)), found.stderr)
+
+
+# The panel the session shell draws (`panel-view.cjs`), for the reader below: a request, a message with the
+# same title and a route, at the sizes a scenario's terminal gives the panel.
+PANEL_SCRIPT = r"""
+const path=require('node:path'),view=require(process.argv[1]);
+const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(c)?2:1),0);
+const t=text=>({text}),title='검토 제목 9c4f7d',paint={harness:t('codex'),model_text:t('GPT 5.5'),effort:t('high')};
+// (11-27: a closed request keeps its direction after its result, so the requester's closed one is sent: `✓ →`.)
+const req=(glyph,kind,status,id='rq-aaaaaa',way=glyph==='→'?'→':'←')=>({id,way,glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
+const route=(state,glyph)=>({id:'rt-a',title,state,kind:state,shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
+  paint:{glyph:t(glyph),harness:t('claude')}});
+const message={way:'←',who:'[b2]',harness:'codex',when:'09:01',kind:'reply',text:title+' · open'};
+// A received message whose three lines quote a route box with the request in it (the review's screen, 72 cells).
+const quoting=['│ ╭─ ROUTE ─────────── ›─╮ │','│ │ ← [b2] '+title+' · open │ │','│ ╰────────────────────╯ │']
+  .map((text,i)=>({...message,when:'09:0'+i,text}));
+const cases={
+ 'message-only':[44,40,true,[],[message],[]],
+ 'message-quotes-a-box':[72,40,true,[],quoting,[]],
+ 'request-and-message':[44,40,true,[req('←','request-in','open')],[message],[]],
+ 'request-40':[40,40,true,[req('←','request-in','open')],[message],[]],
+ 'short-no-rule':[38,7,true,[req('←','request-in','open')],[message],[]],
+ 'narrow':[32,7,true,[req('←','request-in','open')],[message],[]],
+ 'bottom':[80,24,false,[req('←','request-in','open')],[message],[]],
+ 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb','→')],
+   [{...message,way:'→'}],[route('done','✓')]],
+ 'requester-no-request':[44,40,true,[],[{...message,way:'→'}],[route('done','✓')]],
+ // (11-27, review of #1905: a closed request whose title begins with an arrow, an older record with no tag and no direction,
+ // and a newer one that carries its direction; the bottom layout at 44 cells.)
+ 'arrow-title-old':[44,24,false,[{id:'rq-cccccc',glyph:'✓',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
+ 'arrow-title-new':[44,24,false,[{id:'rq-cccccc',glyph:'✓',way:'→',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
+};
+const out={};
+for(const [name,[width,height,side,requests,messages,routes]] of Object.entries(cases)){
+ const v=view.render({width,height,side,model:{route_count:routes.length,routes,requests,messages,styles:{}},state:'working',
+   frame:1000,since:990,cellWidth:cells,configuration:{side_width:width},background:''});
+ out[name]=v.rows.map(r=>r.map(p=>p.text).join(''));
+}
+console.log(JSON.stringify(out));
+"""
+
+
+class PanelRequestLinesTest(unittest.TestCase):
+    """The scenario reads the request lines from the panel the session shell draws: the screen cut to the panel's
+    columns first, then the route box right inside the panel's frame (11-27: a received message in MESSAGES wears the
+    same `←` as a received request, and a conversation or a message may quote a whole route box)."""
+
+    TITLE = "검토 제목 9c4f7d"
+    BOX = ["│ ╭─ ROUTE ─────────── ›─╮ │", f"│ │ ← [b2] {TITLE} · open │ │", "│ ╰────────────────────╯ │"]
+    TALK = [f"  에이전트가 적은 줄: │ │ ← [b2] {TITLE} · open │ │", "  ▐▛███▛█   Claude Code"]
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        found = subprocess.run(["node", "-e", PANEL_SCRIPT, str(HERE / "session-shell" / "panel-view.cjs")],
+                               capture_output=True, text=True, timeout=60)
+        if found.returncode:
+            raise AssertionError(found.stderr)
+        cls.panels = json.loads(found.stdout)
+
+    def lines(self, name, marks="←", *, talk=None, left=False, cols=200, folded=False):
+        """The reader over ``name``'s panel on a whole screen ``cols`` wide beside ``talk`` (right of it, or left with
+        ``left``), told where the host placed the panel (as ``native-display.cjs`` ``layout`` gives it)."""
+        panel = self.panels[name]
+        self.assertTrue(panel[0].startswith("┌") and panel[-1].startswith("└"), "\n".join(panel))
+        width = cells(panel[0])
+        screen = on_screen(panel, self.TALK if talk is None else talk, cols, left)
+        layout = {"folded": folded, "panelColumn": 0 if left or width >= cols else cols - width, "panelCols": width}
+        return cases.panel_request_lines(screen, [self.TITLE], marks, layout=layout)
+
+    def test_a_received_message_with_the_request_title_is_not_a_request(self):
+        # (The first review's screen: no request, a received message whose text reads like a request line.)
+        self.assertTrue(any(f"← [b2] {self.TITLE} · open" in row for row in self.panels["message-only"]),
+                        "\n".join(self.panels["message-only"]))
+        self.assertEqual(self.lines("message-only"), [])
+
+    def test_a_route_box_quoted_in_messages_or_the_conversation_is_not_the_panels(self):
+        # (a) No request: three received messages in a 72-cell panel quote a route box with the request in it.
+        rows = self.panels["message-quotes-a-box"]
+        self.assertTrue(any("╭─ ROUTE" in row for row in rows) and not any(row.startswith("│ ╭─") for row in rows),
+                        "\n".join(rows))
+        self.assertEqual(self.lines("message-quotes-a-box"), [])
+        # (b) No request: the conversation beside the panel quotes the same box.
+        self.assertEqual(self.lines("message-only", talk=["  " + line for line in self.BOX]), [])
+        # (c) A request: the conversation's quoted bottom border stands on the same screen row as the real box's
+        # first inner row, which must not close the panel's box.
+        panel = self.panels["request-and-message"]
+        top = next(i for i, row in enumerate(panel) if row.startswith("│ ╭─ ROUTE"))
+        talk = [""] * (top + 1) + ["  " + self.BOX[2]]
+        self.assertEqual(self.lines("request-and-message", talk=talk), [f"← [b2] {self.TITLE} · open"])
+
+    def test_the_request_is_counted_once_with_the_panel_on_either_side(self):
+        rows = self.panels["request-and-message"]
+        self.assertTrue(any(row.startswith("│ │ ← [b2] codex GPT 5.5 high") for row in rows), "\n".join(rows))
+        self.assertEqual(self.lines("request-and-message"), [f"← [b2] {self.TITLE} · open"])
+        self.assertEqual(self.lines("request-and-message", left=True, talk=self.TALK + ["  " + line for line in self.BOX]),
+                         [f"← [b2] {self.TITLE} · open"])
+
+    def test_a_short_or_narrow_panel_drops_the_rule_and_cuts_the_title(self):
+        for name in ("short-no-rule", "narrow"):
+            rows = self.panels[name]
+            self.assertFalse(any("─ request ─" in row for row in rows), "\n".join(rows))
+            self.assertTrue(any("…" in row and row.startswith("│ │ ← [b2]") for row in rows), "\n".join(rows))
+            found = self.lines(name)
+            self.assertEqual(len(found), 1, (name, found, rows))
+            self.assertTrue(found[0].startswith("← [b2] 검") and "…" in found[0] and found[0].endswith(" · open"),
+                            (name, found))
+
+    def test_a_title_that_begins_with_an_arrow_is_told_from_the_direction_after_the_result(self):
+        # Review of #1905 (🔴4): the arrow after a closed request's result is its direction only where the words after it still
+        # read as a recorded title; an older record drew none, and its title may begin with an arrow itself.
+        title = ["→ Move patch"]
+        old = on_screen(panel_of("✓ → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(old, title, "→✓✕", layout=RIGHT), ["✓ → Move patch · final answer"])
+        new = on_screen(panel_of("✓ → → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(new, title, "→✓✕", layout=RIGHT), ["✓ → → Move patch · final answer"])
+        tagged = on_screen(panel_of("✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"))
+        self.assertEqual(cases.panel_request_lines(tagged, ["Move patch"], "→✓✕", layout=RIGHT),
+                         ["✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"])
+        # The rows the panel draws for them, read as the scenario reads them (44 cells, the bottom layout).
+        for name, want in (("arrow-title-old", "✓ → Move patch · final answer"), ("arrow-title-new", "✓ → → Move patch · final answer")):
+            panel = self.panels[name]
+            self.assertTrue(any(want in row for row in panel), "\n".join(panel))
+            layout = {"folded": False, "panelColumn": 0, "panelCols": cells(panel[0])}
+            self.assertEqual(cases.panel_request_lines(on_screen(panel, (), 44), title, "→✓✕", layout=layout), [want], name)
+
+    def test_the_bottom_layout_reads_the_one_row_form_under_the_conversation(self):
+        # An 80-column window: the panel stands under the native area, as wide as the window.
+        self.assertEqual(self.lines("bottom", cols=80, talk=["  " + line for line in self.BOX]),
+                         [f"← [b2] {self.TITLE} · open"])
+
+    def test_the_reviews_four_screens_read_only_what_the_host_placed(self):
+        panel = self.panels["request-40"]
+        head = next(i for i, row in enumerate(panel) if row.startswith("│ │ ← [b2]"))
+        # (a) The default 200 x 50 window, a 40-cell panel on the right: the conversation on the request's head row
+        # ends in a decomposed `가` (U+1100 U+1161: two cells for the terminal, three by East Asian width).
+        decomposed = " " * 156 + "\u1100\u1161"
+        self.assertEqual(cells(decomposed), 158)
+        self.assertEqual(self.lines("request-40", talk=[""] * head + [decomposed]), [f"← [b2] {self.TITLE} · open"])
+        # (b) The panel on the left, a short conversation: the screen's widest row is not the window.
+        self.assertEqual(self.lines("request-40", left=True, talk=["hello"]), [f"← [b2] {self.TITLE} · open"])
+        # (c) The panel folded to its strip, the conversation quoting a whole 40-cell panel from column 161.
+        quoted = "\n".join([*(" " * 160 + row for row in panel), "  folded strip ▴"])
+        folded = {"folded": True, "side": False, "left": False, "panelColumn": 0, "panelCols": 200}
+        self.assertEqual(cases.panel_request_lines(quoted, [self.TITLE], "←", layout=folded), [])
+        self.assertEqual(cases.panel_request_lines(quoted, [self.TITLE], "←", layout=RIGHT),
+                         [f"← [b2] {self.TITLE} · open"])   # (the same screen, were the panel open there)
+        # Folded, the panel's place is the whole window: a quote from the row's start is still the conversation's.
+        at_start = "\n".join([*panel, "  folded strip ▴"])
+        self.assertEqual(cases.panel_request_lines(at_start, [self.TITLE], "←", layout=folded), [])
+        # (d) Without the host's placement the reader does not read.
+        with self.assertRaises(TypeError):
+            cases.panel_request_lines(quoted, [self.TITLE], "←")
+        with self.assertRaises(KeyError):
+            cases.panel_request_lines(quoted, [self.TITLE], "←", layout={"folded": False})
+
+    def test_with_no_request_record_no_line_is_read_and_no_placement_asked(self):
+        scenario = cases.RequestFlowScenario()
+        scenario.records = lambda run: {}
+        scenario.panel_layout = lambda *args: self.fail("asked the host for a placement with no request made")
+        scenario.target_tui = SimpleNamespace(screen=lambda: "receiver screen")
+        with tempfile.TemporaryDirectory() as out:
+            run = SimpleNamespace(tui=SimpleNamespace(screen=lambda: "requester screen"), output=out, harness="claude")
+            shown = scenario.panels(run, "open")
+        self.assertEqual((shown["requester"], shown["receiver"]), ([], []))
+        self.assertTrue(Path(shown["receiver_screen_file"]).name.startswith("panel-open-receiver"))
+
+    def test_a_window_started_without_the_session_shell_has_no_panel_to_read(self):
+        scenario = cases.RequestFlowScenario()
+        record = {"title": "t", "requester": {"session_id": "sid-a"}, "recipient": {"session_id": "sid-b"}}
+        scenario.records = lambda run: {"rq-aaaaaa": record}
+        asked = []
+        scenario.panel_layout = lambda run, tui, sid: asked.append(sid) or {"folded": True, "panelColumn": 0, "panelCols": 200}
+        shell = ["/usr/bin/python3", "/src/utilities/session-shell/entry.py", "--", "/bin/claude"]
+        scenario.target_tui = SimpleNamespace(screen=lambda: "native only", argv=["/bin/claude"])
+        with tempfile.TemporaryDirectory() as out:
+            run = SimpleNamespace(tui=SimpleNamespace(screen=lambda: "", argv=shell), output=out, harness="claude")
+            shown = scenario.panels(run, "open")
+        self.assertEqual((shown["requester"], shown["receiver"], asked), ([], [], ["sid-a"]))
+
+    def test_the_scenario_passes_the_hosts_own_placement(self):
+        """``panel_layout`` asks the window's host (its binding for the session, its ``status``) and tmux (the pane
+        size), and hands them to the host's own ``native-display.cjs`` ``layout``; what it cannot get is an error."""
+        from unittest import mock
+        import session_shell
+        import harness_behavior_cases_session_upgrade as upgrade
+        scenario = cases.RequestFlowScenario()
+
+        class Run:
+            harness = "claude"
+        run = Run()
+        with tempfile.TemporaryDirectory() as home:
+            run.home = SimpleNamespace(env={"HOME": home, "XDG_CONFIG_HOME": home})
+            tui = SimpleNamespace(_tmux=lambda *args: SimpleNamespace(stdout="200 50\n"))
+            seats = [{"sid": "sid-other"}, {"sid": "sid-a"}]
+            for expanded, want in ((True, {"folded": False, "side": True, "panelColumn": 160, "panelCols": 40}),
+                                   (False, {"folded": True, "side": False, "panelColumn": 0, "panelCols": 200})):
+                answer = {"ok": True, "expanded": expanded}
+                with mock.patch.object(upgrade, "bindings", lambda env, harness: seats), \
+                        mock.patch.object(session_shell, "control", lambda binding, op: answer if binding["sid"] == "sid-a" else {}):
+                    found = scenario.panel_layout(run, tui, "sid-a")
+                self.assertEqual({key: found[key] for key in want}, want)
+            with mock.patch.object(upgrade, "bindings", lambda env, harness: seats), \
+                    mock.patch.object(session_shell, "control", lambda binding, op: {"ok": False, "reason": "control-unavailable"}):
+                with self.assertRaises(RuntimeError):
+                    scenario.panel_layout(run, tui, "sid-a")
+            with mock.patch.object(upgrade, "bindings", lambda env, harness: seats), self.assertRaises(StopIteration):
+                scenario.panel_layout(run, tui, "sid-unknown")
+            with mock.patch.object(upgrade, "bindings", lambda env, harness: seats), \
+                    mock.patch.object(session_shell, "control", lambda binding, op: {"ok": True, "expanded": True}), \
+                    self.assertRaises(AttributeError):
+                scenario.panel_layout(run, SimpleNamespace(), "sid-a")
+
+    def test_a_finished_route_with_the_same_title_is_not_a_closed_request(self):
+        self.assertEqual(self.lines("requester", "→✓✕"),
+                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ → [b2] {self.TITLE} · final answer"])
+        rows = self.panels["requester-no-request"]
+        self.assertTrue(any(row.startswith("│ │ ✓ ") for row in rows), "\n".join(rows))
+        self.assertEqual(self.lines("requester-no-request", "→✓✕"), [])
 
 
 class FlowVerdictTest(unittest.TestCase):
@@ -298,7 +557,7 @@ class FlowVerdictTest(unittest.TestCase):
         scenario.a_requests = lambda run: a_wakes
         scenario.start_a = lambda run, text: None
         scenario.wait_state = lambda run, request_id, state, timeout=90: True
-        shown = {"requester": ["→ [67] x · open"], "receiver": ["◂ [df] x · open"]} if panels else {"requester": [], "receiver": []}
+        shown = {"requester": ["→ [67] x · open"], "receiver": ["← [df] x · open"]} if panels else {"requester": [], "receiver": []}
         scenario.panels = lambda run, tag: ({**shown, "requester": ["✓ [67] x · final"]} if tag == "closed" and panels else shown)
         run = SimpleNamespace(harness=harness, evidence={"session_shell": {}} if shell else {}, notes=[],
                               main_requests=lambda: [], note=lambda text: run.notes.append(text))

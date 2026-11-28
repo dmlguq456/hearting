@@ -37,6 +37,10 @@ from typing import Callable, NamedTuple, Optional
 
 UTILITIES = Path(__file__).resolve().parent
 ROOT = UTILITIES.parent
+if str(UTILITIES) not in sys.path:
+    sys.path.insert(0, str(UTILITIES))
+
+from environment_inheritance import inherited_environment  # noqa: E402
 
 PROFILE = "mini"
 DEFAULT_BUDGET = 90.0
@@ -170,8 +174,8 @@ def _workdir() -> Path:
 
 
 def _child_env() -> dict:
-    """The model call's environment: a worker, with no borrowed route or attempt."""
-    env = {key: value for key, value in os.environ.items()
+    """The model call's environment: a worker, with no borrowed route, attempt, or window."""
+    env = {key: value for key, value in inherited_environment().items()
            if key in _KEEP_NAMES or not key.startswith(_SCRUB_PREFIXES)}
     env["AGENT_SESSION_ROLE"] = "worker"
     return env

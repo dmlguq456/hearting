@@ -125,7 +125,8 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
     reference_census = (f" {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                         f"{version}  {clock}")
     reference = reference_census.ljust(79) + "⠏"
-    census = (f"⠏ {working} ● {idle} ● {blocked} hearting {version} · unmanaged  {clock}")
+    # (11-27: the current Fleet draws the answer wait's count with `◑`; the frozen reference keeps `●`.)
+    census = (f"⠏ {working} ● {idle} ◑ {blocked} hearting {version} · unmanaged  {clock}")
     gap = 80 - len(host) - len(census)
     if gap < 0:
         raise ValueError("fixture header exceeds 80 cells")
@@ -155,7 +156,7 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
         candidate_cells[0][column] = (" ", None, None)
     for text, style in (("⠏", "g_spin"), (f" {working}", "g_spin"), (" ", None),
                         ("●", "g_work_off"), (f" {idle}", "g_work_off"), (" ", None),
-                        ("●", "g_blocked"), (f" {blocked}", "g_blocked"), (" ", None),
+                        ("◑", "g_blocked"), (f" {blocked}", "g_blocked"), (" ", None),
                         ("hearting", "hearting_name"), (" " + version, "version_release"),
                         (" · ", "dim"),
                         ("unmanaged", "version_method"), (f"  {clock}", "dim")):
@@ -179,7 +180,7 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
     host = " hosts ⌂ mgpu-a1  ◇ gpu  ◇ xgpu-b  ◇ lgpu-c  ◇ gpu-c 5/5"
     old_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                   f"{version}  {clock}")
-    new_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
+    new_census = (f"⠏ {working} working  ● {idle} idle  ◑ {blocked} answer needed   hearting "
                   f"{version} · {method}  {clock}")
     old_start, new_start = width - 1 - len(old_census), width - 1 - len(new_census)
     reference = host + " " * (old_start - len(host)) + old_census + " "
@@ -200,8 +201,8 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
                    ("   ", "branch_s"), ("hearting", "hearting_name"),
                    (" " + version, "version_release")]
     reference_census = base_census + [("  " + clock, "dim")]
-    candidate_census = base_census + [(" · ", "dim"), (method, "version_method"),
-                                      ("  " + clock, "dim")]
+    candidate_census = ([(text.replace("●", "◑"), style) if style == "g_blocked" else (text, style) for text, style in base_census] +
+                        [(" · ", "dim"), (method, "version_method"), ("  " + clock, "dim")])
 
     def style_parts(cells, start, parts):
         for text, style in parts:
@@ -579,7 +580,7 @@ class ClassificationTests(unittest.TestCase):
                 (11, ("3", "dim", None)),                 # wrong host count
                 (13, ("X", None, None)),                   # adjacent cell outside host prefix
                 (record["fleet2_rows"][0].index("⠏ 0") + 2, ("1", "g_spin", None)),  # wrong status count
-                (record["fleet2_rows"][0].index("● 0", record["fleet2_rows"][0].index("●") + 1) + 2,
+                (record["fleet2_rows"][0].index("◑ 0") + 2,
                  ("1", "g_blocked", None)),               # wrong blocked count
                 (record["fleet2_rows"][0].index("gad247"), ("b", "version_release", None)),
                 (record["fleet2_rows"][0].index("hearting"), ("x", "hearting_name", None)),
@@ -636,6 +637,32 @@ class ClassificationTests(unittest.TestCase):
                       [(entry["rule"], entry["class"]) for entry in hit_result["entries"]])
         self.assertIn(("hits", "unexplained", "unexplained"),
                       [(entry["kind"], entry["class"], entry["rule"]) for entry in hit_result["entries"]])
+
+    def test_the_current_fleet_header_at_80_and_168_is_read_by_the_candidate_patterns(self):
+        # 11-27 (the eight marks): the header the product draws now counts the answer wait with `◑`; both candidate readers
+        # take it, cell for cell where the narrow check reads the cells, and the frozen reference's pattern keeps its `●`.
+        from tools.fleet.explorer.frame import draw
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import ExplorerViewModel
+        from tools.fleet.tests import parity_today as P
+        hosts = [{"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "gpu"}, {"mark": "◇", "name": "xgpu-b"},
+                 {"mark": "◇", "name": "lgpu-c"}, {"mark": "◇", "name": "gpu-c"}]
+        version = "v3.50.3-20-gad247e2b6"
+        vm = ExplorerViewModel(sessions=[{"state": s} for s in ("working", "working", "idle", "blocked")], hosts=hosts,
+                               hearting={"version": version, "install_method": "unmanaged"},
+                               system={"install": {"version": version}, "usage_api": {"freshness": "02:38"}})
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            narrow = draw(vm, NavState(view="OVERVIEW", scope="-"), 80, 45, beat=1)
+            wide = draw(vm, NavState(view="OVERVIEW", scope="-"), 168, 45, beat=1)
+        for frame, pattern in ((narrow, P._CANDIDATE_NARROW_HEADER), (wide, P._CANDIDATE_WIDE_HEADER)):
+            row = "".join(cell[0] for cell in frame.cells[0])
+            spinner = next(index for index, char in enumerate(row) if char in P._SPINNER_GLYPHS)
+            match = pattern.fullmatch(row[spinner + 1:])
+            self.assertIsNotNone(match, row)
+            self.assertEqual((match.group("working"), match.group("idle"), match.group("blocked")), ("2", "1", "1"), row)
+            self.assertIsNone(P._REFERENCE_NARROW_HEADER.fullmatch(row[spinner + 1:]), row)
+            mark = row.index("◑", spinner)
+            self.assertEqual(tuple(frame.cells[0][mark][:2]), ("◑", "g_blocked"), row)
 
     def test_r14_wide_method_insertion_is_source_bound_and_tuple_exact(self):
         record = _r14_wide_header_record()

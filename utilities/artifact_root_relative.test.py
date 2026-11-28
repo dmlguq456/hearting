@@ -6,6 +6,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import unittest
@@ -15,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import artifact_campaign as C
 import artifact_producer as P
+import campaign_document
 
 _spec = importlib.util.spec_from_file_location("root_relative_producer_fixture", HERE / "artifact_producer.test.py")
 F = importlib.util.module_from_spec(_spec)
@@ -55,14 +57,31 @@ def tree(base):
 # Caches that carry file-system inode numbers and history lines whose ids hash the real clock: they differ
 # between any two runs of the same command, however the root was typed.
 RUN_SPECIFIC = (".runtime/artifact-admission/v1/index.json.head.json", ".runtime/routes/.route-children-index.json",
-                ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json",
-                ".runtime/campaign-document/watermark.json")  # the campaign documents' pass mark is a clock reading
+                ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json")
 HISTORY = ".runtime/artifact-producer/v1/history/"
+# The campaign documents are written by the detached entrance worker, which FROZEN does not reach: it reads the
+# real clock and the checkout's `origin/main` at its own moment. Its caches (the pass mark, each campaign's
+# horizon and git base) are set aside whole, and in a document only the minute of the pass stands apart
+# (CI 11-27: `08:09` against `08:10`; locally main moved between two runs).
+WORKER_CACHE = ".runtime/campaign-document/"
+_PASS_TIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+
+
+def _without_pass_time(value):
+    try:
+        text = bytes.fromhex(value).decode("utf-8")
+    except (TypeError, ValueError):
+        return value
+    head = text.split("\n", 1)[0]
+    if campaign_document.MARKER not in head and campaign_document.RECORD_MARKER not in head:
+        return value
+    return _PASS_TIME.sub("<pass time>", text)
 
 
 def comparable(snapshot, root_name):
-    kept = {k: v for k, v in snapshot.items()
-            if not k.startswith(root_name + "/" + HISTORY) and k[len(root_name) + 1:] not in RUN_SPECIFIC}
+    kept = {k: _without_pass_time(v) for k, v in snapshot.items()
+            if not k.startswith(root_name + "/" + HISTORY) and k[len(root_name) + 1:] not in RUN_SPECIFIC
+            and not k[len(root_name) + 1:].startswith(WORKER_CACHE)}
     history = sorted(k for k in snapshot if k.startswith(root_name + "/" + HISTORY) and k.endswith(".jsonl"))
     return kept, len(history)
 

@@ -33,6 +33,7 @@ import artifact_directory_bundle
 import artifact_campaign
 import route_lineage
 import directory_record_index
+from artifact_root_selection import PRODUCER_REL, cutover_path, inspect_root_activation, read_cutover_record
 from runtime_observation import ObservationContext, stable_read_bytes
 
 
@@ -62,7 +63,6 @@ _HISTORICAL_PROJECTIONS = ObservationContext(
     max_entries=8192, max_weight=8 * 1024 * 1024
 )
 
-PRODUCER_REL = ".runtime/artifact-producer/v1"
 CONTRACT = "artifact-producer/v1"
 REVISION_RECORD_NAME = "revision.json"
 ALGORITHM_VERSION = "w7c-producer/v1"
@@ -321,6 +321,20 @@ def _excluded_by_roots(rel: str, roots: Iterable[str]) -> bool:
     return any(rel == root or rel.startswith(root + "/") for root in roots)
 
 
+def _request_member_dirs(directory: Path) -> Set[str]:
+    """The execution folders a frame cycle at `directory` holds for its request.
+
+    A request's execution scopes own their own manifests. Never include a
+    later execution's files in the frame's immutable output inventory: the
+    first seal and every later refresh of the frame leave these folders out.
+    Each is named cycle-relative (`_internal/executions/<cycle-id>`), so every
+    walker compares the same form whether `directory` is absolute or not."""
+    import artifact_request
+    return {"/".join((*artifact_request.EXECUTIONS, path.name))
+            for path in artifact_request.members(directory.parents[2], directory, strict=False)} if (
+        directory.parent.parent.name == "campaigns") else set()
+
+
 def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str, Any]] = None,
                       excluded_roots: Optional[List[str]] = None,
                       excluded: Optional[List[str]] = None,
@@ -330,18 +344,14 @@ def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str
     roots = excluded_roots if excluded_roots is not None else []
     excluded_paths = excluded if excluded is not None else []
     skipped = set(skip_directories)
-    # A request's execution scopes own their own manifests. Never include a
-    # later execution's files in the frame's immutable output inventory.
-    import artifact_request
-    request_members = set(artifact_request.members(directory.parents[2], directory, strict=False)) if (
-        directory.parent.parent.name == "campaigns") else set()
+    request_members = _request_member_dirs(directory)
     out: List[Path] = []
     for current, dirs, files in os.walk(str(directory), followlinks=False):
         dirs.sort()
         for name in list(dirs):
             path = Path(current) / name
             rel = path.relative_to(directory).as_posix()
-            if path in request_members:
+            if rel in request_members:
                 dirs.remove(name)
                 continue
             if os.path.islink(path):
@@ -410,10 +420,6 @@ def _copy_tree_files(source: Path, target: Path) -> Tuple[List[Tuple[str, str, i
 
 def producer_dir(root: Path) -> Path:
     return Path(root) / PRODUCER_REL
-
-
-def cutover_path(root: Path) -> Path:
-    return producer_dir(root) / "cutover.json"
 
 
 def compat_override_path(root: Path) -> Path:
@@ -531,7 +537,7 @@ def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
 
 
 def read_cutover(root: Path) -> Dict[str, Any]:
-    value = _read_json(cutover_path(root))
+    value = read_cutover_record(root)
     if value is None:
         return {"state": "inactive"}
     return value
@@ -627,35 +633,17 @@ def classify_root(root: Path, *, collect_legacy_top_level: bool = False) -> Dict
         "identity": None, "reason": None,
         "legacy_top_level": [], "legacy_top_level_complete": collect_legacy_top_level,
     }
-    path = cutover_path(root)
-    cutover: Optional[Dict[str, Any]] = None
-    if path.exists():
-        cutover = _read_json(path)
-        if cutover is None:
-            result["state"] = "malformed"
-            result["reason"] = "cutover-record-unreadable"
-            return result
-    if cutover is not None and cutover.get("state") not in ("active", "inactive"):
+    cutover, active_identity, reason = inspect_root_activation(root)
+    if reason is not None:
         result["state"] = "malformed"
-        result["reason"] = "cutover-schema-unknown"
+        result["reason"] = reason
         return result
-    try:
-        identity = artifact_lifecycle.read_root_identity(root)
-    except artifact_lifecycle.LifecycleError:
-        result["state"] = "malformed"
-        result["reason"] = "root-identity-invalid"
-        return result
-    if cutover is not None and cutover.get("state") == "active":
-        cutover_root_id = (cutover.get("identity") or {}).get("artifact_root_id")
-        if identity is None or cutover_root_id != identity.artifact_root_id:
-            result["state"] = "malformed"
-            result["reason"] = "identity-conflict"
-            return result
+    if active_identity is not None:
         result["state"] = "active"
         result["cutover_state"] = "active"
         result["activation_kind"] = cutover.get("activation_kind", "approval")
-        result["identity"] = {"repository_id": identity.repository_id,
-                              "artifact_root_id": identity.artifact_root_id}
+        result["identity"] = {"repository_id": active_identity.repository_id,
+                              "artifact_root_id": active_identity.artifact_root_id}
         return result
     if not root.exists():
         result["state"] = "inactive-empty"

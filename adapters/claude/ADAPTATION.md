@@ -318,15 +318,21 @@ stdout, and is a no-op for registered workers and native subagents. Herdr's
 separate hook remains optional corroboration and is not edited.
 
 `native-question-redirect.py` is `PreToolUse(AskUserQuestion)` (it replaces the plain
-decision-marker entry). It registers the question (text, choices, a label ending
-`(권장)`/`(Recommended)` as the recommendation) as this session's Hearting question through
-`utilities/native_question_redirect.py` and refuses the native call with one short line
-(the question id, "end your turn"). Several questions, `multiSelect` and `preview` are
-written as one text question listing the options. When registration fails, times out
-(5 s inside the hook's 10 s) or the caller is a registered worker or native subagent, the
-native question runs as before and only then does the decision marker above apply. The
-frame-answer `PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question
-is answered on the question board. Codex has no
+decision-marker entry) and carries the three outcomes of `utilities/native_question_redirect.py`.
+Registered: the question (text, choices, a label ending `(권장)`/`(Recommended)` as the
+recommendation, secrecy) becomes this session's Hearting question, or is the same question
+already open, whatever else the session waits on; the native call is refused with one short
+line (the id, "end your turn"). Several questions, `multiSelect` and `preview` are written as
+one text question listing the options. Pass: registration failed before any write (a shape it
+cannot carry, no seat, a failed write, the 5 s budget inside the hook's 10 s) and no same
+question was read; the native question runs with the decision marker above (a marker that
+cannot be written does not hold it back), and the same call again is decided anew. Unknown
+(the question storage cannot be read, a lost write result cannot be read back): the call is
+refused with that reason once. A registered worker or
+native subagent runs the native question as before. A hook the harness times out or that dies
+lets the native question open (outside Hearting's control). The frame-answer
+`PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question is answered on
+the question board. Codex has no
 `PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
 exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
 same wait clear and index-lock hint there, so the adaptation boundary keeps the
@@ -426,6 +432,36 @@ from `CFG_PROFILE_MEMORY_SCOUT`), this one is hand-authored and pins `haiku` —
 tier leaves it where it is. Read it as an explicit pin, not as "the mini tier". Every other
 native subagent spawn resolves its model through the native-subagent default
 below.
+
+## A Native Subagent Call Becomes a Unit Route (H1)
+
+The same `Agent|Task` registration runs `hooks/subagent-model-default.sh --redirect` (timeout
+180 s). The model policy below decides first; a call it lets through goes to
+`utilities/native_subagent_redirect.py`, which decides once, before anything is registered, whether
+Hearting takes it (`capabilities/unit.md`, A native subagent call). Once the start receipt holds it
+(running, waiting for a free worker, or ended) the native call is refused with the route's line; Claude
+shows it to the model after `PreToolUse:Agent hook error:`. Certain means: the definition Claude picks for
+the name is Hearting's shipped one apart from the rendered `model`/`effort`/profile lines, or a built-in (a
+project `.claude/agents/` file, found walking up from the working directory, wins over the user's,
+https://code.claude.com/docs/en/sub-agents#choose-the-subagent-scope; any other file whose frontmatter
+names it, in any YAML form, counts); no other `PreToolUse` hook matches `Agent`/`Task` in the user,
+project, local or managed settings or an installed plugin, because matching hooks run in parallel
+(https://code.claude.com/docs/en/hooks#hook-handler-fields), and Hearting's own command, compared exactly,
+is registered once; no deny/ask rule names `Agent`/`Task`, because those apply whatever a hook returns
+(https://code.claude.com/docs/en/permissions#precedence-among-rules-hooks-and-mods); and the `claude`
+process that runs the hook (read from `/proc`) was started without `--settings`, `--agents`, `--add-dir`,
+`--plugin-dir`, `--setting-sources` or a tool rule. Skill or subagent frontmatter hooks and server-managed
+settings are not visible to the hook; the hook reads what it can, and a host without `/proc` keeps every
+call native. One script holds the policy and the redirect because how two hooks on one matcher combine a
+deny with an `updatedInput` was not verified. A call queued behind a full worker slot (`Queued as …`) starts from the runtime's capacity resume after the
+session's turn ended; `dispatch-owner-rewake.py` arms on the attempts that exist at that turn's end, so an
+idle session gets the answer with its next turn (measured: the queued worker ran about two minutes after the
+line, the answer came with the next prompt). When Hearting does not take the call, nothing is printed by
+that step and the model default below applies as before. A session opened before this registration keeps
+the old line (no `--redirect`, 15 s) and redirects nothing until Claude's settings watcher reloads the hook
+settings. Measured in isolated TUIs (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent`
+with `description`, `prompt`, `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past
+its timeout lets the native call run; exit 2 blocks it (the redirect always exits 0).
 
 ## Native Subagent Default Model (2026-07-23)
 

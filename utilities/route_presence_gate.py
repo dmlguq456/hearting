@@ -4,7 +4,8 @@
 Ordinary main-session edits and commits in the current Git worktree pass;
 existing turn hooks record their changes. This gate does not classify size.
 Other-worktree work and plain long-run commands retain the route-existence
-check, worker/runtime/artifact/CI exemptions and fail-open behavior. Actual
+check, worker/runtime/artifact/CI exemptions and fail-open behavior (except an
+unloadable root-selection module, which exits 1 where a choice needs it). Actual
 Git projects under the temp directory retain the historical gate exemption;
 the recorder includes them independently.
 Independent installed/shared-checkout guards and native permissions remain.
@@ -136,24 +137,59 @@ def _primary(top: Path):
     return Path(os.path.realpath(gitdir.parent.parent.parent))
 
 
+class SelectionUnavailable(ImportError):
+    """``artifact_root_selection`` cannot be loaded. ``judge`` lets this one through, so the
+    hook exits 1 as it did when the module was imported at start-up."""
+
+
+def _sibling_modules() -> None:
+    """Put this file's folder on ``sys.path`` for the lazy sibling imports: run as a script
+    under ``PYTHONSAFEPATH=1``, Python leaves it out."""
+    utilities = str(Path(__file__).resolve().parent)
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+
+
+def _select_artifact_root():
+    _sibling_modules()
+    try:
+        from artifact_root_selection import select_artifact_root
+    except Exception as error:  # noqa: BLE001 -- missing or broken file alike
+        raise SelectionUnavailable(f"artifact_root_selection: {error}") from error
+    return select_artifact_root
+
+
+# The refusals ``artifact-root.sh`` states itself, for which no choice is missing. Any other
+# failure without a path (python3's 1 or 2, exit 0 with no answer, a signal) may come from a
+# choice that failed on the selection module, so that module is probed once.
+# Premise: ``artifact_root_selection.py``'s ``__main__`` never exits 64, 66 or 67, so those codes
+# passed on by the shell are the shell's own; a Python start-up hook exiting so is out of scope.
+_SHELL_REFUSALS = (
+    64,  # AGENT_ARTIFACT_ROOT is not an absolute path
+    66,  # a path the shell needs is missing (override parent, start folder, resolver link)
+    67,  # an installed source tree, refused by ``emit`` alone or after python3 chose it
+)
+
+
 def artifact_root(top: Path, env) -> str:
     """Canonical artifact root for the work tree ``top``.
 
     Computed in-process only where that is exactly what ``artifact-root.sh`` answers (no
     ``AGENT_ARTIFACT_ROOT``, standard ``.git`` layout); otherwise the resolver runs.
+    Raises ``SelectionUnavailable`` when the choice needs a selection module that cannot load.
     """
     if not env.get("AGENT_ARTIFACT_ROOT"):
         primary = _primary(top)
         if primary is not None:
-            for name in _ARTIFACT_DIRS:
-                if (primary / name).is_dir():
-                    return os.path.realpath(primary / name)
-            return str(primary / ".agent_reports")
+            root = _select_artifact_root()(primary)
+            return os.path.realpath(root) if root.is_dir() else str(root)
     result = subprocess.run(["sh", str(ROOT / "utilities" / "artifact-root.sh"), str(top)],
                             capture_output=True, text=True, timeout=20, check=False,
                             env=dict(env))
     lines = (result.stdout or "").strip().splitlines()
     if result.returncode != 0 or not lines:
+        if result.returncode not in _SHELL_REFUSALS:
+            _select_artifact_root()  # the resolver's choice may have failed on the same module
         return ""
     return os.path.realpath(lines[-1])
 
@@ -431,25 +467,6 @@ def _slug_word(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "work"
 
 
-def _campaign_key(root: str, top: Path) -> str:
-    newest, key = -1.0, ""
-    try:
-        entries = list(os.scandir(Path(root) / "campaigns"))
-    except OSError:
-        entries = []
-    for entry in entries:
-        match = re.match(r"^\d{4}-\d{2}-\d{2}_(.+)$", entry.name)
-        if not match or not entry.is_dir():
-            continue
-        try:
-            mtime = entry.stat().st_mtime
-        except OSError:
-            continue
-        if mtime > newest:
-            newest, key = mtime, match.group(1)
-    return key or _slug_word((_primary(top) or top).name)
-
-
 def _agent_home(env) -> Path:
     home = env.get("AGENT_HOME")
     if home and (Path(home) / "utilities" / "capability-route.py").is_file():
@@ -464,6 +481,8 @@ def _agent_home(env) -> Path:
 def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
     # The cycle folder already carries the date, so the slug is the name alone; a
     # managed release is printed as its `current` pointer like every other printed command.
+    _sibling_modules()
+    from capability_route_scope import compose_campaign_default
     from parent_next_directive import entrypoint
 
     stem = Path(target).stem if kind == "edit" and target else kind
@@ -475,9 +494,11 @@ def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
     else:
         command_parts.extend(["--shape", "direct"])
     command_parts.extend(["--field", shlex.quote("<field>")])
-    command_parts.extend([
-        "--campaign-key", shlex.quote(_campaign_key(root, top)),
-        "--slug", shlex.quote(_slug_word(stem)), "--cwd", shlex.quote(str(top))])
+    # If ordinary compose would need a campaign choice, the small recovery command
+    # can still start its standalone work without selecting another stream.
+    if compose_campaign_default(root, top).source is None:
+        command_parts.append("--unassigned")
+    command_parts.extend(["--slug", shlex.quote(_slug_word(stem)), "--cwd", shlex.quote(str(top))])
     command = " ".join(command_parts)
     task_guidance = ("It prepares an isolated worktree; make the edit in the worktree it prints."
                      if kind == "edit" else "It records the route for changes already made in place.")
@@ -521,7 +542,8 @@ def _triggers(payload: dict, env) -> list[tuple[str, Path, str]]:
 
 
 def judge(harness: str, payload: dict, env=None) -> str:
-    """The one-time refusal for this payload, or ``""`` (pass). Never raises."""
+    """The one-time refusal for this payload, or ``""`` (pass). Raises only
+    ``SelectionUnavailable``: a choice that needs an unloadable selection module."""
     env = os.environ if env is None else env
     try:
         if _exempt(env) or not isinstance(payload, dict):
@@ -544,7 +566,9 @@ def judge(harness: str, payload: dict, env=None) -> str:
             if kind == "commit" and not _has_source_change(top, root, env):
                 continue
             return refusal(root, top, kind, target, env)
-    except Exception:  # noqa: BLE001 -- any judgement failure passes
+    except SelectionUnavailable:
+        raise
+    except Exception:  # noqa: BLE001 -- any other judgement failure passes
         return ""
     return ""
 

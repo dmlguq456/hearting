@@ -28,6 +28,11 @@ FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
 sys.path.insert(0,str(P.parent))
 sys.path.insert(0,str(P.parent.parent/"tools"))
+import fixture_processes  # noqa: E402
+# A `close` run from the CLI is not a test process, so it asks the detached entrance
+# worker for a turn and returns without waiting for it (capability_route_close.py).
+# Its tests remove their artifact root with fixture_processes.TemporaryDirectory,
+# which settles that writer first.
 from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D
 CLI_STAGE_COMPILE=unique_attempt_id("att-cli-stage-compile")
@@ -1593,7 +1598,7 @@ class TestRoute(unittest.TestCase):
     registry=json.loads(json.dumps(R.TOPO.load_registry())); mutate(registry)
     with mock.patch.object(R.TOPO,"load_registry",return_value=registry):
      if current:
-      self.assertNotIn("_registry_current",R.verify_route(route,R.ROOT))
+      self.assertIs(R.verify_route(route,R.ROOT)["_registry_current"],True)
      else:
       self.assertIs(R.verify_route(route,R.ROOT)["_registry_current"],False)
  def test_composed_requires_standard_plus(self):
@@ -1656,7 +1661,7 @@ class TestRoute(unittest.TestCase):
   # was bypassed almost every time it fired. The route closes, the sidecar
   # records `terminal_gate_proven=false`, and one warning line says so.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -1680,7 +1685,7 @@ class TestRoute(unittest.TestCase):
   # `--allow-unproven` is still accepted (compatibility) and changes nothing; the
   # no-flag form is covered by test_close_before_complete_records_unproven_without_refusing.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -1706,7 +1711,7 @@ class TestRoute(unittest.TestCase):
  def test_close_accepts_a_route_id(self):
   # `close --route` named a file only; the `rt-...` id the other commands print was a FileNotFoundError.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -5088,7 +5093,7 @@ class TestValidationBasis(unittest.TestCase):
    self.assertIn("registered=0 started=0 child_spawned=0",launch.stderr)
  def test_close_still_accepts_launch_tuple_mismatch(self):
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)/"artifacts"
    route=R.compile_route(**self.args(artifact_root=artifact_root))
    route["launch_compatibility_tuple"]["runtime_root"]["content_digest"]="sha256:"+"f"*64
@@ -5138,7 +5143,7 @@ class TestValidationBasis(unittest.TestCase):
    with contextlib.redirect_stderr(io.StringIO()) as err:
     verified=R.verify_route(route,R.ROOT)
    self.assertNotIn("gate-off",err.getvalue())
-   self.assertNotIn("_registry_current",verified)
+   self.assertIs(verified["_registry_current"],True)
    R.verify_route(route,R.ROOT)
  def test_edit_to_the_same_capability_or_a_shared_section_makes_the_route_stale(self):
   route=R.compile_route(**self.args())
@@ -5330,6 +5335,65 @@ class TestValidationBasis(unittest.TestCase):
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
    outcome,created=R.close_route(verified,path,commit="d"*40,allow_unproven=True)
    self.assertTrue(created)
+
+ def test_close_records_the_readers_catalog_verdict_not_the_route_files(self):
+  # `_registry_current` is outside the route hash, so a route file may carry one
+  # without any hash warning. Both closers -- the `close` CLI, which verifies first,
+  # and the raw route JSON the terminal commit passes -- record the reader's verdict.
+  import subprocess,sys
+  env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+  env.pop("AGENT_DISPATCH_JOBS",None)
+  def same_catalog(route):
+   return route
+  def other_catalog(route):
+   route["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+   route["registry_digest"]="sha256:"+"1"*64
+   route["capability_registry_digest"]="sha256:"+"1"*64
+   return route
+  def newer_basis(route):
+   route["validation_basis"]["basis_version"]=R.VALIDATION_BASIS_VERSION+1
+   return route
+  cases=((same_catalog,False,True),(other_catalog,True,False),(newer_basis,True,False))
+  for vary,carried,expected in cases:
+   for closer in ("cli","raw-json"):
+    with self.subTest(case=vary.__name__,closer=closer), fixture_processes.TemporaryDirectory() as tmp:
+     artifact_root=Path(tmp)/"artifacts"
+     sealed=self._reseal(vary(R.compile_route(**self.args(artifact_root=artifact_root))))
+     on_disk=dict(sealed,_registry_current=carried)
+     self.assertEqual(R.route_hash(on_disk),sealed["route_hash"])
+     route_path=R.canonical_route_path(artifact_root,sealed["route_id"])
+     R.write_once(route_path,on_disk)
+     if closer=="cli":
+      result=subprocess.run(
+       [sys.executable,str(P),"close","--route",str(route_path),"--commit","d"*40],
+       capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+      self.assertEqual(result.returncode,0,result.stderr)
+     else:
+      R.close_route(json.loads(route_path.read_text(encoding="utf-8")),route_path,
+                    commit="d"*40,allow_unproven=True)
+     outcome=json.loads(R.outcome_path(route_path).read_text(encoding="utf-8"))
+     self.assertIs(outcome["registry_current"],expected)
+     row=next(row for row in R.route_status(artifact_root) if row["route_id"]==sealed["route_id"])
+     self.assertIs(row["registry_current"],expected)
+
+ def test_raw_json_close_records_not_current_when_the_sealed_catalog_path_cannot_be_read(self):
+  # The catalog verdict is a record. A sealed `registry_root` turned into a link to itself
+  # (RuntimeError from Path.resolve() on Python 3.12; another version may raise OSError or
+  # not raise at all) is recorded as not current, and the close still writes its outcome.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)/"artifacts"; catalog=Path(tmp)/"catalog-a"; catalog.mkdir()
+   route=R.compile_route(**self.args(artifact_root=artifact_root))
+   route["validation_basis"]["registry_root"]=str(catalog)
+   route["registry_digest"]=route["capability_registry_digest"]="sha256:"+"1"*64
+   sealed=self._reseal(route)
+   route_path=R.canonical_route_path(artifact_root,sealed["route_id"])
+   R.write_once(route_path,sealed)
+   catalog.rmdir(); os.symlink(catalog,catalog)
+   outcome,created=R.close_route(json.loads(route_path.read_text(encoding="utf-8")),route_path,
+                                 commit="d"*40,allow_unproven=True)
+   self.assertTrue(created)
+   self.assertIs(outcome["registry_current"],False)
+   self.assertIs(json.loads(R.outcome_path(route_path).read_text(encoding="utf-8"))["registry_current"],False)
 
 class GroundingCwdLineageTest(unittest.TestCase):
  """SD-107 × SD-67/69: the mutation worktree's HEAD may move along its first-parent line."""
@@ -8535,8 +8599,8 @@ class ComposeRouteTest(TestRoute):
   self.assertNotIn("campaign_key",old); self.assertNotIn("parent_cycle_id",old)
   self.assertIs(old["campaign_unassigned"],True)
   R.verify_route(old,R.ROOT)
-  # A keyless proposal is never silently degraded: a root with no stream yet opens one named
-  # after the folder (W6-E); a root that has one refuses and names the escape hatch.
+  # A new root can open a stream named after the project folder (W6-E).
+  # A terminal stream with that name leaves the work unassigned.
   with tempfile.TemporaryDirectory() as tmp:
    project=Path(tmp)/"My Project_2"; project.mkdir()
    first=self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
@@ -8547,20 +8611,21 @@ class ComposeRouteTest(TestRoute):
    stream("active")
    with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
     self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
-   # One that cannot be joined keeps the refusal that lists the streams; no stream is opened.
    stream("abandoned")
-   with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
-    self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
-   # The rule on the fold's states: none or closed (reopens, as `--campaign-key <folder>` would)
-   # opens the folder's stream; any active stream, or one that cannot be joined, refuses.
+   fallback=self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   self.assertNotIn("campaign_key",fallback)
+   self.assertEqual(R.compose_campaign_selection(fallback)["mode"],"unassigned")
+   self.assertNotIn("campaign_unassigned",fallback)
    reports=str(project/".agent_reports")
-   for rows,expected in (([], "my-project-2"),
-                         ([{"key":"my-project-2","state":"satisfied","campaign_id":"camp_"+"4"*32}], "my-project-2"),
-                         ([{"key":"my-project-2","state":"abandoned"}], None),
-                         ([{"key":"my-project-2","state":"satisfied"},{"key":"my-project-2","state":"satisfied"}], None),
-                         ([{"key":"other","state":"active"}], None), (None, None)):
+   for rows,expected in (([], ("my-project-2","project-folder-first-stream")),
+                         ([{"key":"my-project-2","state":"satisfied","campaign_id":"camp_"+"4"*32}], (None,"unassigned")),
+                         ([{"key":"my-project-2","state":"abandoned"}], (None,"unassigned")),
+                         ([{"key":"my-project-2","state":"superseded"}], (None,"unassigned")),
+                         ([{"key":"my-project-2","state":"satisfied"}]*2, (None,"unassigned")),
+                         ([{"key":"other","state":"active"}], (None,None)), (None, (None,None))):
     with self.subTest(rows=rows), patch_split(R,"compose_campaign_summaries",return_value=rows):
-     self.assertEqual(R.first_campaign_key(reports,R.ROOT),expected)
+     pick=R.compose_campaign_default(reports,R.ROOT)
+     self.assertEqual((pick.key,pick.source),expected)
   with self.assertRaisesRegex(ValueError,"compose-campaign-selection-conflict"): self.compose(campaign_key="tts-v6-release",unassigned=True)
   by_parent=self.compose(parent_cycle_id="cyc_"+"b"*32)
   self.assertNotIn("campaign_unassigned",by_parent); self.assertEqual(R.compose_campaign_selection(by_parent)["mode"],"parent")
@@ -8595,12 +8660,12 @@ class ComposeRouteTest(TestRoute):
    receipt=R.compose_receipt(joined,Path(tmp)/"route.json")
    self.assertEqual(receipt["campaign"]["mode"],"join")
    # A root with no active stream yet opens one named after the folder instead of refusing
-   # (W6-E): a closed or superseded stream alone leaves nothing to choose from.
+   # (W6-E) when the folder's key is available.
    fresh=self.compose(artifact_root=str(root/"fresh"),unassigned=False)
-   self.assertEqual(fresh["campaign_key"],R.first_campaign_key(str(root/"fresh"),R.ROOT))
+   self.assertEqual(fresh["campaign_key"],R.compose_campaign_default(str(root/"fresh"),R.ROOT).key)
    self.assertEqual(R.compose_campaign_selection(fresh)["mode"],"create")
-   self.assertEqual(R.first_campaign_key(str(root/"fresh"),str(root/"Some.Repo")),"some-repo")
-   self.assertIsNone(R.first_campaign_key(tmp,R.ROOT))   # tts-v6-release is active
+   self.assertEqual(R.compose_campaign_default(str(root/"fresh"),str(root/"Some.Repo")).key,"some-repo")
+   self.assertIsNone(R.compose_campaign_default(tmp,R.ROOT).source)   # tts-v6-release is active
    # A failed campaign scan is reported as unavailable, never as "no campaigns" / "create".
    import artifact_producer
    with mock.patch.object(artifact_producer,"list_campaign_summaries",side_effect=OSError("scan failed")):

@@ -2897,7 +2897,9 @@ def cmd_retire(args):
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
     lines = _read_screen(target)
-    screen_reason = (_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines else "screen-unavailable"
+    # A shell seat's own reason for no screen (too large, an editor open) is the wait's.
+    screen_reason = ((_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines
+                     else _shell_screen_reason(target) or "screen-unavailable")
     if screen_reason:
         return finish(screen_reason, pending=True)
     # A tmux pane in a mode, with input off or synchronized takes no keys: nothing is
@@ -3055,7 +3057,8 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
     lines = _read_screen(target)
     tasks = _retire_background_dialog_lines(lines)
     if tasks is None:
-        return finish("agent-still-running", pending=True)
+        return finish("agent-still-running" if lines else _shell_screen_reason(target) or "screen-unavailable",
+                      pending=True)
     stopped = " stopped-background=" + json.dumps(tasks, ensure_ascii=False) if tasks else ""
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
@@ -3066,7 +3069,7 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
         current_tasks = _retire_background_dialog_lines(current)
         if current_tasks is not None:
             return current_tasks, None
-        return None, _blocking_screen(harness, current)
+        return None, _blocking_screen(harness, current) if current else _shell_screen_reason(target)
 
     current_tasks, screen_block = observed_dialog()
     if current_tasks is None:
@@ -6469,14 +6472,12 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                 state in {"idle", "done"} and (
                     state in until or (initial_state not in {None, "unknown", state}
                                        and previous_state != state)))
-            # A watch that already took this change up asks the runner, through a
-            # token in its observation, for one fresh authority read before it
-            # publishes; that request is answered here even though the native
-            # state no longer changes.
-            serving = (previous_wait.get("state") == "result" and previous_state == state
-                       and state in {"idle", "done"}
-                       and isinstance(previous.get("readiness_transition"), dict))
-            if not trigger and not serving:
+            # Recheck an accepted idle/done result while its watch is pending,
+            # including before the observer has a reason to request fresh authority.
+            recheck = (state in {"idle", "done"} and previous_state == state
+                       and (previous.get("state") == "pending"
+                            or isinstance(previous.get("readiness_transition"), dict)))
+            if not trigger and not recheck:
                 if previous.get("state") == "terminal_pending":
                     # A confirmed end/replacement request waits for its watcher; a
                     # no-notice observation must never overwrite it.
@@ -6829,6 +6830,9 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         if message and message.get("state") == "received":
                             peer_obligations.acknowledge_session_notice_delivery(message, roots=[root])
                         continue
+                    # An answer that ended without arriving, here or by an older release's
+                    # courier, is the person's to give again before its duty retires.
+                    session_notice.release_undelivered_answer(record)
                     store.update(duty["id"], state="complete", delivery=record["state"], cleanup="complete",
                                  expected_phases={(duty.get("observation") or {}).get("phase", "waiting")})
                     continue
@@ -8435,6 +8439,16 @@ def _read_screen(target):
     return _read_screen_reason(target)[0]
 
 
+def _shell_screen_reason(target):
+    """Why a shell seat gave no screen (``shell-screen-large``, an open editor), else ``""``."""
+    seat = _shell_seat(target)
+    if seat is None:
+        return ""
+    import session_shell
+    lines, why = session_shell.native_screen_reason(seat)
+    return why if lines is None else ""
+
+
 def _read_screen_reason(target):
     """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
     seat = _shell_seat(target)
@@ -8826,7 +8840,7 @@ def cmd_idle_card_request(args):
 
 
 # Screen doubts that pass on their own; an older shell host does not, so it is not waited for.
-_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer"})
+_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer", "shell-screen-large"})
 
 
 def _look_outcome(reason):
@@ -8893,14 +8907,15 @@ def _continue_look(target, req):
 
 
 def _continue_composer_reason(target, harness="codex"):
-    """Why a Codex or OpenCode continue must not start a turn now: the input box holds the
-    person's writing, a form is open, or the screen cannot be read; else None.
+    """Why a continue must not start a turn now: the input box holds the person's writing, a form
+    is open, or the screen cannot be read; else None.
 
-    Claude's continue types into the pane behind the same judgement
-    (`_native_idle_prompt_guard`); Codex's goes through its native queue and OpenCode's through
-    its idle plugin, which start the turn at the moment the session is idle (not by typing, so
-    the writing is never overwritten, but never started over either), so the box is read before
-    the continue is bound to either."""
+    Every harness reads the box here before the claim, so a draft holds the continue without a
+    bound ref and the helper asks again. Claude's continue then types into the pane behind the
+    same judgement once more (`_native_idle_prompt_guard`); Codex's goes through its native queue
+    and OpenCode's through its idle plugin, which start the turn at the moment the session is
+    idle (not by typing, so the writing is never overwritten, but never started over either), so
+    for those two the box is read again after the claim, before the continue is bound."""
     refusal = _tmux_input_refusal(target)
     if refusal:
         return refusal
@@ -8979,7 +8994,7 @@ def cmd_continue(args):
         if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
                 transfer_ref or str(req.get("new_session") or "-") == "-"):
             return "queued"
-        if harness in ("codex", "opencode") and reason in clear.CONTINUE_INPUT_WAIT:
+        if clear.hold_continue_for_input(None, reason):
             return "queued"     # the writing in the box or a passing doubt; nothing was bound
         return _look_outcome(reason)
 
@@ -9004,7 +9019,8 @@ def cmd_continue(args):
     if req is None:
         return finish("skipped", why)
     reason = _continue_look(target, req)
-    if not reason and harness in ("codex", "opencode"):
+    if not reason:
+        # Before the claim on every harness: a draft or an open form holds the continue unbound.
         reason = _continue_composer_reason(target, harness)
     if reason:
         return finish(held(reason), reason)

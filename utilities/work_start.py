@@ -31,6 +31,7 @@ from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
 )
+from dispatch_registry_cache import demand_replacement_rows, registry_scope_active, registry_snapshot
 from route_authority import caller_identity as interactive_parent_identity, default_parent_session_id
 import route_authority
 from codex_managed_dispatch import ManagedDispatchError, probe_managed_codex_parent
@@ -646,6 +647,19 @@ def attempt_id(route, node):
 def _rows(jobs):
     if not jobs.exists():
         return {}
+    # Reuse the shared attempt index for an unchanged registry generation.
+    # A start must still observe new generations across the launcher and join,
+    # even if its caller has pinned an earlier read-only observation.
+    if not registry_scope_active():
+        demand_replacement_rows()
+        try:
+            indexed = registry_snapshot(jobs).view.replacement_rows()
+        except OSError:
+            indexed = None
+        if indexed is not None and indexed[1] is None:
+            return {aid: (fields[1], meta.copy()) for aid, (fields, meta) in indexed[0].items()}
+    # Keep the original text semantics for legacy line separators, duplicate
+    # attempts (last row wins), and an unindexable or unstable file.
     rows = {}
     for line in jobs.read_text().splitlines():
         fields = line.split("\t")
@@ -1188,7 +1202,7 @@ def _capacity_pause(result, attention, resume, *, unit=False):
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     if state.cancellation_requested:
-        return {"attempt_id": aid, "classification": "success" if state.cancelled else "pending",
+        return {"attempt_id": aid, "classification": delivery_classification(state) if state.cancelled else "pending",
                 "required_action": "advance-completed" if state.cancelled else "",
                 "cancellation_requested": True, "state": "cancelled" if state.cancelled else "termination-pending",
                 "reason": "cancelled-by-parent"}
@@ -3034,6 +3048,20 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
                 "bounded-wait means run parent_next_command once."}
 
 
+def _unit_stop(row, capacity=False) -> str:
+    """How a unit turn's capacity end reads, or "". Any recorded capacity evidence reads the same broad way:
+    none of it tells a usage limit from a provider at capacity. `dead-usage-limit` alone is no evidence: the
+    early-death watcher also writes it for any retry exhaustion (a 503, a reset connection, a 401)."""
+    from dispatch_capacity_evidence import _LEGACY_QUOTA_NOTES
+    from dispatch_supervisor_terminal import _CODEX_CAPACITY_STRUCTURED_CODES as codes
+    notes = {"dead-capacity", *_LEGACY_QUOTA_NOTES} - {"dead-usage-limit"}
+    if (capacity or row.get("note") in notes or row.get("failure_class") == "capacity"
+            or row.get("api_status") == "429" or row.get("quota_window")
+            or row.get("provider_failure_kind") in {*codes, "provider.rate-limit", "provider.quota"}):
+        return "stopped for capacity (a usage limit or a provider at capacity)"
+    return ""
+
+
 def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, resumed=False):
     """Start the one leg of a unit route, or report where it is; repeating this launches nothing twice.
 
@@ -3095,18 +3123,22 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
             if step.get("reason") == "replacement-capacity-wait":
                 return _capacity_pause({**result, "result": outcome}, step, resume, unit=True)
             if step.get("state") == "needs-attention":
+                # Only the turn's stop and the step's reason go before the step's own instruction: whether
+                # the continuation launched is not settled here, so nothing is promised about it.
                 return {**result, "state": "needs-attention", "reason": step["reason"],
                         "result": outcome, "replacement_attention": [step],
                         "parent_next": "inspect-receipt", "parent_next_command": "",
-                        "next_step": step.get("retry_when") or step.get("next_step")
-                            or "Inspect the unit recovery receipt before continuing this route."}
+                        "next_step": f"The unit worker {_unit_stop(source, True)}; its recovery reported "
+                            f"{step['reason']}. " + (step.get("retry_when") or step.get("next_step")
+                            or "Inspect the unit recovery receipt before continuing this route.")}
         # Ordinary failed or missing results keep the existing inspection and compose path.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
                 "parent_next_command": command,
-                "next_step": "The unit worker ended without a pass. Read its result and report; to run the "
-                    "same unit again, run parent_next_command (a new route; this one stays as it ended)."}
+                "next_step": f"The unit worker {_unit_stop(source) or 'ended without a pass'}. Read its result and "
+                    "report; to run the same unit again, run parent_next_command (a new route; this one stays as "
+                    "it ended)."}
     if wait:
         return _wait_expired(result)
     status, metadata = _rows(jobs).get(aid, rows[aid])

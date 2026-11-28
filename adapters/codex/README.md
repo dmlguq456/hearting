@@ -145,7 +145,8 @@ workers do not. The retired broker exposes only legacy `status`/`stop`.
 dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage
 workers; `direct` is inline and `quick` is one registered-headless
 dispatch-depth-1 one-shot conductor. For `autopilot-code`, `capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`).
-Use native subagents only after `preflight.sh subagent-info --check`. After
+A native subagent call (`spawn_agent`) is taken as a Hearting unit route by the
+`PreToolUse` hook when that is certain, and otherwise runs natively. After
 integration, verification, and push, use `preflight.sh worktree-cleanup
 --check` before `--apply`; SessionEnd/Stop never cleans worktrees.
 
@@ -172,7 +173,7 @@ read-only unless the user explicitly opts into a separately validated feature.
 | agent home | A valid explicit `AGENT_HOME` wins. Otherwise Codex-owned wrappers resolve `$HOME/.codex/hearting`, canonical `$HOME/hearting`, or legacy `$HOME/agent_setting` before falling back to their source checkout; invoking `preflight.sh` through a linked feature worktree therefore does not activate that worktree as the runtime harness root |
 | permission model | Run `adapters/codex/bin/preflight.sh permissions`; use Codex native approval policy and sandbox settings, not Claude `allowedTools` |
 | MCP config | Run `adapters/codex/bin/preflight.sh mcp [--check]`; use Codex native `codex mcp`/config surfaces, not Claude `settings.json` MCP payloads |
-| artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
+| artifact root | primary checkout's canonical root via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only |
 | worktree cleanup | `preflight.sh worktree-cleanup`; dry-run first, apply only after merge + integrated verification + push |
 | routing-contract signal | `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]` is a worker-startup/manual subcommand (not a per-turn injection) whose output includes `routing_contract=core/WORKFLOW.md`, `routing_action=read-workflow-and-select-codex-skill`, `capability_entrypoints=codex-native-skills`, and git dirty/worktree/dead-branch risk fields (re-derived from the harness status snapshot); run it manually or at worker startup |
 | harness status snapshot | Run `adapters/codex/bin/preflight.sh status [cwd] [session-id]` for read-only artifact, notes, worktree, and git-risk signals, including tracked-dirty vs untracked counts and sibling worktree counts. This does not replace Codex `/statusline` for model/context/token/session fields |
@@ -185,7 +186,7 @@ read-only unless the user explicitly opts into a separately validated feature.
 | completion delivery | Interactive Codex parents use the native per-thread queue, addressed to CODEX_THREAD_ID. Delivery is at-least-once with exact pending/history checks. The launcher and interactive gateway are retired; registered headless owners retain their private App Server supervisor. The TUI remains the sole question/approval owner. |
 | launch publication settle | When an App Server owner turn ends during the atomic register-to-`launch_started=1` publication window, with or without the runtime-wait sentinel, the Codex supervisor briefly rereads only undelivered exact-parent rows outside registry locks. A fully fenced batch parks without a model retry or continuation charge; genuinely register-only rows retain the bounded `registration-required` correction. The supervisor never replays the dispatch itself |
 | autopilot routing | Codex exposes `autopilot-*` as native Skills/plugin entries and can select matching Skills from descriptions, but the adapter does not emulate Claude slash-command routing. `prompt-signal` emits the portable routing contract and Codex-native entrypoint surface; for spec-backed work, rely on spec-read/capability gates plus the relevant Skill or explicit dispatch wrapper |
-| subagent delegation | Codex supports native subagent workflows, but they are explicit or main-dispatched. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents before claiming delegation parity. Use prompt-directed subagents or `preflight.sh dispatch`; do not treat UI/status state as an automatic delegation trigger |
+| subagent delegation | A person's session's `spawn_agent` call (multi-agent v1) is taken as a `general/explore` unit route by the `PreToolUse` hook (`adapters/codex/hooks/pretooluse-subagent-redirect.py`, `utilities/native_subagent_redirect.py`) when that is certain (`capabilities/unit.md`, A native subagent call); otherwise, a multi-agent v2 call and a registered worker's call run natively. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents that native path uses. Do not treat UI/status state as an automatic delegation trigger |
 
 A question to the person goes to the Hearting question board: `PreToolUse` on
 `request_user_input` and `request_user_input_async` registers it and refuses the native call
@@ -498,7 +499,7 @@ the route profile passed by the wrapper.
 
 ## Compatibility
 
-Codex should create new project artifacts only under the root returned by `utilities/artifact-root.sh`. In a linked task worktree this is the primary checkout's `.agent_reports/`, not the tracked local snapshot. The dispatch wrapper injects `AGENT_ARTIFACT_ROOT` and grants exactly that path with Codex `--add-dir`; legacy `.claude_reports/` remains a canonical-root fallback.
+Codex creates new project artifacts under the root returned by `utilities/artifact-root.sh`. Linked task worktrees use the primary checkout's canonical root. The dispatch wrapper injects `AGENT_ARTIFACT_ROOT` and grants that path with Codex `--add-dir`.
 
 Codex should resolve harness-home paths through `AGENT_HOME` or the Codex-owned `utilities/agent-home.sh`. Some shared legacy tools still accept `CLAUDE_HOME` as a migration alias, but Codex-owned wrappers should not use it as their runtime-home fallback.
 

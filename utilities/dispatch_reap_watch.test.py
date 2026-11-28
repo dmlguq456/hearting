@@ -622,10 +622,20 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertNotIn("attempt_descendant_residue=", row)
 
     def test_open_missing_result_is_closed_after_exact_group_drain(self):
+        for provider_kind in ("", "cyberPolicy"):
+            with self.subTest(provider_kind=provider_kind):
+                self._assert_missing_result_close(provider_kind)
+
+    def _assert_missing_result_close(self, provider_kind):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
             attempt = unique_attempt_id("att-detached-missing-result")
+            log = base / "attempt.jsonl"
+            if provider_kind:
+                log.write_text(json.dumps({"type": "dispatch.supervisor.turn.failed",
+                                           "codex_error_info": provider_kind,
+                                           "message": "private-fixture-output"}) + "\n")
             worker = subprocess.Popen(
                 ["sleep", "0.08"],
                 env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
@@ -638,7 +648,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                     **identity,
                     "attempt_id": attempt,
                     "launch_lifecycle": "detached",
-                    "log_file": str(base / "missing.jsonl"),
+                    "log_file": str(log),
                     "route_id": "rt-reap-leg",
                     "route_hash": "sha256:reap-leg",
                     "route_node": "impl-review-alternative",
@@ -673,6 +683,9 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
             self.assertIn("terminal_event=dispatch-reap-missing-result", row)
+            metadata = D.parse_registry_metadata(row.rstrip("\n").split("\t")[5])
+            self.assertEqual(metadata.get("provider_failure_kind", ""), provider_kind)
+            self.assertNotIn("private-fixture-output", row)
             ledger = base / "degradations" / "rt-reap-leg.jsonl"
             with ledger.open(encoding="utf-8") as stream:
                 events = [json.loads(line) for line in stream]
@@ -1338,6 +1351,51 @@ class AttemptRecordIndexTest(unittest.TestCase):
         raw = (self._line("open", "att-a", "one") + "\r\n" + self._line("done", "att-a", "two")
                + "\n").encode()
         self._check(raw, "att-a", "two")
+
+
+class LegCloseObservationCostTest(unittest.TestCase):
+    """RV-PR1881 🟡4: a frame or unit leg's watcher reads a busy registry only when
+    its route ledger changes, and judges the close whenever that ledger changes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_text("")
+        self.journal = Path(self.tmp.name) / "ledger" / "journal.jsonl"
+
+    def test_a_busy_registry_alone_does_not_reread_the_leg_row(self):
+        import route_parent_close as CLOSE
+        reads = []
+        observer = CLOSE.RegistryObservation(self.jobs, "att-leg", lambda jobs, aid: reads.append(aid) or (None, {}),
+                                             watched=self.journal)
+        with mock.patch.object(CLOSE, "row_requested", return_value=False):
+            observer.refresh()
+            for n in range(3):
+                with self.jobs.open("a") as handle:
+                    handle.write(f"t\tdone\t/r\t/w\tother\tattempt_id=att-other-{n}\n")
+                observer.refresh()
+            self.assertEqual(len(reads), 1)
+            self.journal.parent.mkdir()
+            self.journal.write_text('{"evidence": {}}\n')
+            observer.refresh()
+            observer.refresh()
+        self.assertEqual(len(reads), 2)
+
+    def test_a_ledger_change_is_judged_even_when_the_row_reads_the_same(self):
+        # RV-PR1881 2nd 🔴2: a close records its intent in the ledger before it marks any row,
+        # so the row can read the same when the ledger change is seen.
+        import route_parent_close as CLOSE
+        judged = []
+        observer = CLOSE.RegistryObservation(self.jobs, "att-leg", lambda jobs, aid: ("open", {"attempt_id": aid}),
+                                             watched=self.journal)
+        with mock.patch.object(CLOSE, "row_requested", side_effect=lambda meta, jobs: judged.append(1) or len(judged) > 1):
+            self.assertFalse(observer.refresh()[2])
+            self.assertFalse(observer.refresh()[2])   # nothing changed: nothing judged again
+            self.journal.parent.mkdir()
+            self.journal.write_text('{"evidence": {"parent_close": {}}}\n')
+            self.assertTrue(observer.refresh()[2])
+        self.assertEqual(len(judged), 2)
 
 
 if __name__ == "__main__":

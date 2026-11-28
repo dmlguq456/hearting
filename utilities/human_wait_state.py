@@ -16,7 +16,7 @@ import threading
 import fcntl
 import math
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 import ipaddress
 import socket
@@ -37,6 +37,9 @@ _SAFE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
+# A route record's values for the first screen of its page (the leg band and the head's first words, `live._panel_route_record`):
+# the first to go where the route details would outweigh their share of the cache.
+_PANEL_PICTURE_KEYS = frozenset({"bands", "head_repo", "session_tag"})
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
 # While a display wants routes the producer starts its next pass early on a change instead of
@@ -247,6 +250,145 @@ def _session_signal_path(value):
     return _path("S4-session:" + json.dumps(identity, ensure_ascii=False, separators=(",", ":")))
 
 
+_QUESTIONS_SUFFIX = ".questions.json"
+_TERMINAL_QUESTIONS_KEPT = 32
+
+
+class _QuestionPath(type(Path())):
+    """A session's message-question file, addressed at one question id.
+
+    ``_read`` of it is that one row, so ``_read(_signal_path(value))`` reads a message
+    question by its id wherever it lives (an earlier release's slot or the session's file)."""
+    question_id = None
+
+
+def _questions_path(harness, session_id, item_id=None):
+    """One file per harness and session id holds its message questions: ``{id: S4 record}``."""
+    raw = json.dumps([harness, session_id], ensure_ascii=False, separators=(",", ":"))
+    path = _QuestionPath(state_root() / (hashlib.sha256(("S4-questions:" + raw).encode("utf-8"))
+                                         .hexdigest() + _QUESTIONS_SUFFIX))
+    path.question_id = item_id
+    return path
+
+
+def _question_row_ok(item_id, row, owner):
+    """A row every reader can use: its id, owner, seat, prompt, time, state, and the one question
+    its detail holds (what lookup, registration and the panel read)."""
+    detail = row.get("detail") if isinstance(row, dict) else None
+    first = detail.get("questions") if isinstance(detail, dict) else None
+    first = first[0] if isinstance(first, list) and first else None
+    return bool(isinstance(row, dict) and row.get("schema_version") == 1 and row.get("source") == "S4"
+                and row.get("mode") == "message" and row.get("id") == item_id
+                and isinstance(row.get("question"), str) and row.get("seat_key")
+                and isinstance(row.get("since"), (int, float))
+                and type(row.get("sequence")) is int and row["sequence"] >= 0
+                and isinstance(row.get("lifecycle"), str)
+                and isinstance(first, dict) and isinstance(first.get("question"), str)
+                and isinstance(first.get("choices"), list)
+                and (row.get("harness"), row.get("session_id")) == owner)
+
+
+def _read_questions_file(path):
+    """The file's questions by id: ``{}`` when it is absent, ``None`` when it is present but
+    cannot be read whole (its questions are then unknown, never "none"), including a file whose
+    harness and session id are not those of its own address."""
+    try:
+        meta = os.lstat(path)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    try:
+        value = (json.loads(path.read_text(encoding="utf-8"))
+                 if stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                 and not stat.S_IMODE(meta.st_mode) & 0o077 else None)
+        rows = value.get("questions") if (isinstance(value, dict) and value.get("schema_version") == 1
+                                          and value.get("source") == "S4-questions") else None
+        owner = (value.get("harness"), value.get("session_id")) if isinstance(rows, dict) else None
+        if (owner is None or Path(path).name != _questions_path(*owner).name
+                or not all(_question_row_ok(item_id, row, owner) for item_id, row in rows.items())):
+            return None
+        return rows
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _question_files():
+    try:
+        return sorted(state_root().glob("*" + _QUESTIONS_SUFFIX))
+    except OSError:
+        return []
+
+
+def message_questions(harness, session_id, seat_key=None):
+    """``(questions by id, state)`` of this session: the one source every reader and writer uses.
+
+    ``state`` is ``"ok"``, or ``"unknown"`` when the session's file cannot be read. The file is
+    read once; with ``seat_key`` the one record an earlier release kept at that seat
+    (``_slot_path``) joins unless the file has its id, so an older writer never replaces a row."""
+    rows = _read_questions_file(_questions_path(harness, session_id))
+    if rows is None:
+        return {}, "unknown"
+    if seat_key:
+        slot = _slot_path({"harness": harness, "session_id": session_id, "seat_key": seat_key})
+        old = _read(slot) if slot is not None else None
+        if (old and old.get("mode") == "message" and old["id"] not in rows
+                and (old.get("harness"), old.get("session_id")) == (harness, session_id)):
+            rows[old["id"]] = old
+    return rows, "ok"
+
+
+def seat_open_messages(harness, session_id, seat_key):
+    """The open message questions this session asked at this seat, oldest first, or ``None``
+    when the session's file cannot be read. One whose chosen answer is on its way is still
+    open here; ``message_answer_pending`` tells it apart."""
+    rows, state = message_questions(harness, session_id, seat_key)
+    if state != "ok":
+        return None
+    return sorted((row for row in rows.values()
+                   if row.get("lifecycle") == "open" and row.get("seat_key") == seat_key),
+                  key=lambda row: (row["since"], row["id"]))
+
+
+def _write_message(signal):
+    """Persist one message question at its address: an earlier release's record in its own slot,
+    any other as a row of its session's file, the whole file replaced at once. The short store
+    lock serializes writers of one session; callers hold the seat lock and not that one."""
+    path = _signal_path(signal)
+    if not isinstance(path, _QuestionPath):
+        _write_signal_source(signal)
+        return
+    with _cache_write_lock():
+        rows = _read_questions_file(path)
+        if rows is None:
+            raise OSError("question-storage-unreadable")
+        rows[signal["id"]] = signal
+
+        def ended_at(row):
+            end = row.get("completion") or row.get("closed")
+            at = end.get("at") if isinstance(end, dict) else None
+            return at if isinstance(at, (int, float)) else row["since"]
+        # The newest ended rows by when they ended; one whose decision record is still owed
+        # (``_queue_message_decision``) stays until it is queued.
+        ended = sorted((row for row in rows.values() if row.get("lifecycle") != "open"),
+                       key=lambda row: (ended_at(row), row["id"]))
+        for row in ended[:-_TERMINAL_QUESTIONS_KEPT]:
+            completion = row.get("completion") or {}
+            if not completion.get("answer") or completion.get("decision_queued"):
+                del rows[row["id"]]
+        _write(path, {"schema_version": 1, "source": "S4-questions", "harness": signal["harness"],
+                      "session_id": signal["session_id"], "questions": rows})
+
+
+def _question_key(record):
+    """What makes two message questions the same: text up to line endings and edge spaces,
+    choice values in order, answer form and secrecy (not the recommendation or choice words)."""
+    question = record["detail"]["questions"][0]
+    text = str(question.get("question") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return (text, tuple(question.get("choices") or ()), bool(question.get("is_other")),
+            bool(question.get("is_secret")))
+
+
 def _seat_signal_paths(seat_key, signal_id=None):
     """Legacy seat-only callers may resolve a single source, never pick a session."""
     result = []
@@ -263,6 +405,23 @@ def _seat_signal_paths(seat_key, signal_id=None):
 
 
 def _signal_path(value, *, write=False):
+    """Where ``value``'s S4 record is read: a message question (a record, binding or envelope
+    naming its id) by that id (``_QuestionPath``) unless an earlier release's slot holds that
+    very id; a body-display marker or a bare seat at its slot (``_slot_path``)."""
+    item_id = value.get("request_id") if "request_id" in value else (
+        value.get("id") if value.get("mode") == "message" else None)
+    if (write or not isinstance(item_id, str) or not item_id.startswith("S4:")
+            or not value.get("harness") or not value.get("session_id")):
+        return _slot_path(value, write=write)
+    path = _questions_path(value["harness"], value["session_id"], item_id)
+    rows = _read_questions_file(path)
+    if rows is None or item_id in rows or not value.get("seat_key"):
+        return path
+    slot = _slot_path(value)
+    return slot if slot is not None and (_read(slot) or {}).get("id") == item_id else path
+
+
+def _slot_path(value, *, write=False):
     """Same private store and public address; the source slot belongs to a SID.
 
     A new exact-session slot supersedes its legacy seat-only copy. Reads never
@@ -305,6 +464,8 @@ def _write_signal_source(value):
 
 
 def _remove_signal_source(value, path):
+    if isinstance(path, _QuestionPath):
+        raise OSError("message-question-is-closed-not-removed")
     if path != _path(value["seat_key"]):
         _retire_legacy_signal(value)
     path.unlink()
@@ -387,6 +548,23 @@ def record_closed_question(item_id, status="closed", *, at=None):
         return False
 
 
+def _find_message(item_id, harness=None, session_id=None):
+    """The message question with this id in any session (sessions' files first), or None."""
+    if harness and session_id:
+        row = (_read_questions_file(_questions_path(harness, session_id)) or {}).get(item_id)
+        if row:
+            return row
+    for path in _question_files():
+        row = (_read_questions_file(path) or {}).get(item_id)
+        if row:
+            return row
+    for path in state_root().glob("*.json"):
+        signal = _read(path) if re.fullmatch(r"[0-9a-f]{64}", path.stem) else None
+        if signal and signal.get("mode") == "message" and signal.get("id") == item_id:
+            return signal
+    return None
+
+
 def closed_question(item_id):
     """Read exact retained evidence only. Absence is not proof a question never existed."""
     if not isinstance(item_id, str):
@@ -394,16 +572,12 @@ def closed_question(item_id):
     projection = _read_cache_file() or {}
     source_closed = None
     if item_id.startswith("S4:"):
-        for path in state_root().glob("*.json"):
-            if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
-                continue
-            signal = _read(path)
-            if (signal or {}).get("id") != item_id:
-                continue
-            if signal.get("lifecycle") == "open":
-                return None
-            if signal.get("lifecycle") == "answered":
-                source_closed = {"status": "answered", "at": (signal.get("completion") or {}).get("at")}
+        signal = _find_message(item_id) or {}
+        if signal.get("lifecycle") == "open":
+            return None
+        if signal.get("lifecycle") in {"answered", "cancelled"}:
+            source_closed = {"status": signal["lifecycle"],
+                             "at": (signal.get("completion") or signal.get("closed") or {}).get("at")}
     if item_id.startswith("S1:"):
         from tools.fleet import interaction
         parts = item_id.split(":")
@@ -562,13 +736,60 @@ def _prune_selected(overlay, needed=1):
     return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
 
 
+def choice_descriptions(question):
+    """Each choice's own words under its name, in choice order (`""` for none): what the board draws.
+
+    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): an object choice's
+    `description`, else its `means`, then its `scope_note` on its own line unless already said; a registered
+    question's plain choices, its optional `choice_descriptions` (`{choice value: words}`). Display only."""
+    if not isinstance(question, dict):
+        return []
+    choices = question.get("choices") if isinstance(question.get("choices"), list) else []
+    given = question.get("choice_descriptions")
+    given = given if isinstance(given, dict) else {}
+    out = []
+    for choice in choices:
+        if isinstance(choice, dict):
+            words = next((value for value in (choice.get("description"), choice.get("means"))
+                          if isinstance(value, str) and value.strip()), "")
+        else:
+            words = given.get(choice) if isinstance(choice, str) else None
+        # The asker's lines stay (spaces made one, an empty line left out).
+        said = ("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
+                if isinstance(words, str) else "")
+        note = " ".join(choice.get("scope_note").split()) if (
+            isinstance(choice, dict) and isinstance(choice.get("scope_note"), str)) else ""
+        if note and note not in " ".join(said.split()):
+            said = said + "\n" + note if said else note
+        out.append(said)
+    return out
+
+
+def _message_choice_descriptions(choices, descriptions):
+    """The registered record's `choice_descriptions`: each given choice's words, in choice order, the
+    empty ones left out (None when none is left: the record then reads as it always did)."""
+    if descriptions is None:
+        return None
+    if (not isinstance(descriptions, dict) or any(key not in choices for key in descriptions)
+            or any(not isinstance(value, str) for value in descriptions.values())):
+        raise ValueError("question-choice-descriptions-invalid")
+    kept = {choice: descriptions[choice].strip() for choice in choices
+            if descriptions.get(choice, "").strip()}
+    return kept or None
+
+
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=None,
+                     descriptions=None):
     """Register one explicit question on the caller's current prompt, without waiting.
 
-    A new question replaces this session's earlier waiting one; the returned value then carries
-    `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
-    different open question in place and refuses instead (`question-open-elsewhere`)."""
+    A different question is added beside this session's other open ones under its own id; it
+    closes none of them. The same question still open (``_question_key``), or this very
+    registration again, returns that record (its id, time and answer). The atomic write of the
+    session's question file is the registration; an answer record is made when an answer or
+    draft comes. ``replace`` is accepted and has no effect (an earlier release replaced).
+    `descriptions` (`{choice value: words}`, optional) are the words the board draws under those
+    choices (`choice_descriptions`); they count toward the record's size and are never part of an answer."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -586,8 +807,11 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if recommended is not None and (type(recommended) is not int
                                     or not 0 <= recommended < len(choices)):
         raise ValueError("question-recommendation-invalid")
+    described = _message_choice_descriptions(list(choices), descriptions)
     question = {"id": "message-response", "question": text, "choices": list(choices),
                 "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
+    if described:
+        question["choice_descriptions"] = described
     detail = {"questions": [question]}
     if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
         raise ValueError("question-detail-too-large")
@@ -604,58 +828,62 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
              "sequence": sequence, "question": text, "detail": detail,
              "since": time.time(), "lifecycle": "open", "cwd": str(cwd or os.getcwd()),
              "incarnation": incarnation}
-    prior = None
     with tidy.seat_lock(seat.key):
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
-        prior = _read(_signal_path(value))
-        if (not replace and prior and prior.get("id") != item_id and prior.get("mode") == "message"
-                and prior.get("lifecycle") == "open"):
-            raise ValueError("question-open-elsewhere")
-        if prior and prior.get("id") == item_id:
-            value = prior
-        envelope = _message_envelope(value)
-        identity = _selected_identity(envelope)
-        key = _selected_entry_key(identity)
-        with _cache_write_lock():
-            projection = _read_cache_file()
-            if projection is None and _cache_path().exists():
-                raise ValueError("selected-response-storage-unreadable")
-            projection = projection or {"schema_version": 3, "observed_at": 0,
-                                       "items": [], "by_session": {}, "complete": False}
-            overlay = projection.get("selected_responses", {})
-            if not _valid_selected_overlay(overlay):
-                raise ValueError("selected-response-storage-invalid")
-            if key not in overlay and not _prune_selected(overlay):
-                raise ValueError("selected-response-capacity-unresolved")
-            # Persist source before its projection. An interrupted projection write
-            # is repaired by the identical registration, with the original since.
-            _write_signal_source(value)
-            for old_key, entry in overlay.items():
-                binding = entry.get("message_binding") or {}
-                if (old_key != key and binding.get("seat_key") == seat.key
-                        and (entry.get("identity") or {}).get("harness") == harness
-                        and (entry.get("identity") or {}).get("session_id") == session_id
-                        and not entry.get("source_terminal")):
-                    entry.update(source_terminal=True, updated_at=time.time())
-                    if not entry.get("action_id"):
-                        entry.update(state="cancelled", transport_settled=True,
-                                     result={"status": "replaced"})
-            if key not in overlay:
-                overlay[key] = {"identity": identity, "selected_id": item_id, "state": "open",
-                                "draft": "", "updated_at": time.time(),
-                                "message_binding": {"seat_key": seat.key, "sequence": sequence}}
-            projection["selected_responses"] = overlay
-            if not _write_cache_value(projection):
-                raise OSError("question-projection-storage-unavailable")
-    if prior:
-        _queue_message_decision(prior)
+        rows, state = message_questions(harness, session_id, seat.key)
+        if state != "ok":
+            raise ValueError("question-storage-unreadable")
+        same = rows.get(item_id) or next((row for row in sorted(rows.values(), key=lambda row: row["since"])
+                                          if row.get("lifecycle") == "open"
+                                          and _question_key(row) == _question_key(value)), None)
+        if same:
+            return same
+        _write_message(value)
+        # An explicit question owns its prompt: this session's body-display marker leaves (it
+        # shared the question's slot, which the question used to overwrite).
+        slot = _slot_path(value)
+        marker = _read(slot) if slot is not None else None
+        if (marker and marker.get("mode") != "message"
+                and (marker.get("harness"), marker.get("session_id")) == (harness, session_id)):
+            with suppress(OSError):
+                _remove_signal_source(marker, slot)
     _request_producer()
-    if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
-            and prior.get("lifecycle") == "open"):
-        # The earlier unanswered question of this session was just closed as replaced.
-        return {**value, "replaced": {"id": prior["id"], "question": str(prior.get("question") or "")}}
     return value
+
+
+def close_message(harness, session_id, seat_key, item_id):
+    """The asking session withdraws one of its questions: ``{id, state}``.
+
+    Only that id becomes ``cancelled``, under its seat lock, and a draft of it goes with it. One
+    already answered or closed returns that end state; one whose chosen answer is on its way, or
+    whose answer record cannot be read, stays for that answer's own receipt (``submitted``).
+    No other question or draft is touched."""
+    import session_tidy as tidy
+    rows, state = message_questions(harness, session_id, seat_key)
+    if state != "ok":
+        raise ValueError("question-storage-unreadable")
+    if item_id not in rows:
+        raise ValueError("question-not-in-this-session")
+    with tidy.seat_lock(rows[item_id]["seat_key"]):
+        signal = _read(_signal_path(rows[item_id]))
+        if not signal:
+            raise ValueError("question-storage-unreadable")
+        if signal.get("lifecycle") != "open":
+            return {"id": item_id, "state": signal.get("lifecycle")}
+        envelope = _message_envelope(signal)
+        entry, known = _selected_lookup(envelope)
+        if not known or (entry or {}).get("action_id"):
+            return {"id": item_id, "state": "submitted"}
+        signal.update(lifecycle="cancelled", closed={"actor": "asker", "at": time.time()})
+        _write_message(signal)
+        _settle_published_wait(item_id)
+        if entry:
+            _store_selected_entry(envelope, dict(entry, state="cancelled", draft="", source_terminal=True,
+                                                 transport_settled=True, result={"status": "cancelled"}))
+    record_closed_question(item_id, "cancelled")
+    _request_producer()
+    return {"id": item_id, "state": "cancelled"}
 
 
 def _message_source(envelope):
@@ -857,7 +1085,7 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         if len(answer_values) == 2:
             completion["note"] = answer_values[1]
     signal.update(lifecycle="answered", completion=completion)
-    _write_signal_source(signal)
+    _write_message(signal)
     _settle_published_wait(signal["id"])
     envelope = _message_envelope(signal)
     entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
@@ -944,7 +1172,7 @@ def _queue_message_decision(signal):
                 current = _read(_signal_path(signal))
                 if current and current.get("id") == signal["id"] and current.get("completion"):
                     current["completion"]["decision_queued"] = True
-                    _write_signal_source(current)
+                    _write_message(current)
     except Exception:
         pass  # Memory never reverses the accepted answer; normal reads can retry.
 
@@ -956,6 +1184,11 @@ def flush_message_decisions():
     except OSError:
         return
     for path in paths:
+        if path.name.endswith(_QUESTIONS_SUFFIX):
+            for signal in (_read_questions_file(path) or {}).values():
+                if signal.get("completion"):
+                    _queue_message_decision(signal)
+            continue
         if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
             continue
         signal = _read(path)
@@ -1024,6 +1257,12 @@ def write_signal(value: dict) -> bool:
                 and (prior.get("lifecycle") == "open"
                      or prior.get("sequence", 0) >= value.get("sequence", 0))):
             return False
+        if value.get("mode") != "message":
+            rows, state = message_questions(value.get("harness"), value.get("session_id"))
+            if state != "ok" or any(row.get("seat_key") == value["seat_key"] and (
+                    row.get("lifecycle") == "open" or row.get("sequence", 0) >= value.get("sequence", 0))
+                    for row in rows.values()):
+                return False
         _write_signal_source(value)
         return True
     except (OSError, ValueError, TypeError):
@@ -1116,36 +1355,44 @@ def _message_claim_open(signal):
 def close_signal(seat_key: str, *, sequence: int | None = None,
                  harness: str | None = None, session_id: str | None = None,
                  answer: str | None = None) -> bool:
-    """Close only this exact seat, and never let an older input clear a newer wait."""
+    """Close only this exact seat, and never let an older input clear a newer wait.
+
+    A body-display marker at the seat is removed. A message question takes this input only
+    when it is the one open question at this seat with no answer on its way; with two or more,
+    a number, a choice's words or a sentence is an ordinary prompt."""
     value = {"seat_key": seat_key, "harness": harness, "session_id": session_id}
     path = _signal_path(value)
     if path is None and _seat_signal_paths(seat_key):
         return False
     try:
-        current = _read(path)
-        if current is None:
+        current = _read(path) if path is not None else None
+        if current is not None and current.get("mode") != "message":
+            if ((harness is not None and current.get("harness") != harness)
+                    or (session_id is not None and current.get("session_id") != session_id)):
+                return False
+            if sequence is not None and int(current.get("sequence", 0)) > int(sequence):
+                return False
+            _remove_signal_source(current, path)
             return True
-        if ((harness is not None and current.get("harness") != harness)
-                or (session_id is not None and current.get("session_id") != session_id)):
-            return False
-        if sequence is not None and int(current.get("sequence", 0)) > int(sequence):
-            return False
-        if current.get("mode") == "message":
-            # The prompt hook already owns the source seat lock. Receipt callers
-            # acquire it in complete_message_answer instead.
-            if harness is None or session_id is None or sequence is None:
-                return False
-            answer = message_prompt_answer(current, answer)
-            if answer is None or message_answer_pending(current):
-                return False
-            return _complete_message_locked(current, answer, "direct", sequence=sequence)
-        _remove_signal_source(current, path)
-        return True
+        if harness is None or session_id is None or sequence is None:
+            return current is None
+        # The prompt hook already owns the source seat lock. Receipt callers
+        # acquire it in complete_message_answer instead.
+        opened = seat_open_messages(harness, session_id, seat_key)
+        if not opened:
+            return opened is not None
+        unanswered = [row for row in opened if not message_answer_pending(row)]
+        answer = message_prompt_answer(unanswered[0], answer) if len(unanswered) == 1 else None
+        return answer is not None and _complete_message_locked(unanswered[0], answer, "direct",
+                                                               sequence=sequence)
     except (OSError, ValueError, TypeError):
         return False
 
 
 def _read(path: Path):
+    if getattr(path, "question_id", None) is not None:
+        row = (_read_questions_file(path) or {}).get(path.question_id)
+        return dict(row) if row else None
     try:
         meta = os.lstat(path)
         if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
@@ -1161,8 +1408,11 @@ def _read(path: Path):
         return None
 
 
-def read_signals(*, now: float | None = None) -> list[dict]:
-    """Read valid private signals. This function never creates or changes state."""
+def read_signals(*, now: float | None = None, health: list | None = None) -> list[dict]:
+    """Read valid private signals. This function never creates or changes state.
+
+    Every open message question of a session's file is one signal; a file that cannot be read
+    is not "none": ``health`` (when given) receives an S4 ``unknown`` row for it."""
     root = state_root()
     try:
         entries = tuple(root.iterdir())
@@ -1172,6 +1422,15 @@ def read_signals(*, now: float | None = None) -> list[dict]:
     out = []
     for path in entries:
         if path.suffix != ".json" or path.is_symlink():
+            continue
+        if path.name.endswith(_QUESTIONS_SUFFIX):
+            rows = _read_questions_file(path)
+            if rows is None and health is not None:
+                health.append({"source": "S4", "state": "unknown", "reason": "question-file-unreadable"})
+            for value in (rows or {}).values():
+                if value.get("lifecycle") == "open":
+                    value["stale"] = wait_fold(value["since"], instant) is not None
+                    out.append(value)
             continue
         value = _read(path)
         if value is None or not isinstance(value.get("since"), (int, float)):
@@ -1214,8 +1473,14 @@ def _message_source_state(item: dict) -> str:
     if not owner.get("seat_key"):
         return "unchecked"
     try:
-        path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
-                             "seat_key": owner["seat_key"], "id": item.get("id")})
+        if item.get("kind") == "message":
+            rows, state = message_questions(owner.get("harness"), owner.get("session_id"), owner["seat_key"])
+            if state != "ok":
+                return "unread"
+            if item.get("id") in rows:
+                return "open" if rows[item["id"]].get("lifecycle") == "open" else "ended"
+        path = _slot_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
+                           "seat_key": owner["seat_key"], "id": item.get("id")})
     except (OSError, ValueError, TypeError):
         return "unread"
     if path is None:
@@ -1442,7 +1707,14 @@ def publish_cache(result: dict) -> bool:
     panels = result.get("route_panels", {})
     # Optional display detail must never crowd question truth out of this cache.
     # Missing detail is unknown; do not manufacture an empty-route observation.
-    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
+    weight = lambda value: len(json.dumps(value, ensure_ascii=False).encode())
+    if isinstance(panels, dict) and weight(panels) > _CACHE_MAX_BYTES // 4:
+        # 11-27: the first screen's picture values go first, so the route details that fit before them still do
+        # (without them a route's first screen is the panel's box, as it was).
+        panels = {key: [{name: value for name, value in row.items() if name not in _PANEL_PICTURE_KEYS}
+                        if isinstance(row, dict) else row for row in rows] if isinstance(rows, list) else rows
+                  for key, rows in panels.items()}
+    if not isinstance(panels, dict) or weight(panels) > _CACHE_MAX_BYTES // 4:
         panels = {}
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,
@@ -1808,6 +2080,16 @@ def _selected_entry(envelope):
     return _selected_lookup(envelope)[0]
 
 
+def _projection_or_new():
+    """Under the store lock: the projection, a new empty one when there is none yet (an answer
+    record comes with the first draft or answer, not with the question), or None when one is
+    there and cannot be read."""
+    value = _read_cache_file()
+    if value is None and not os.path.lexists(_cache_path()):
+        return {"schema_version": 3, "observed_at": 0, "items": [], "by_session": {}, "complete": False}
+    return value
+
+
 def _store_selected_entry(envelope, entry):
     identity = _selected_identity(envelope)
     if identity is None:
@@ -1822,7 +2104,7 @@ def _store_selected_entry(envelope, entry):
         return False
     try:
         with _cache_write_lock():
-            projection = _read_cache_file()
+            projection = _projection_or_new()
             if projection is None:
                 return False
             overlay = projection.get("selected_responses", {})
@@ -1890,7 +2172,7 @@ def _claim_selected_action(envelope, action_id, response, *, answer_attachment=N
     key = _selected_entry_key(identity)
     try:
         with _cache_write_lock():
-            projection = _read_cache_file()
+            projection = _projection_or_new()
             if projection is None:
                 return False, None
             overlay = projection.get("selected_responses", {})
@@ -3319,6 +3601,23 @@ def _workflow_gate_interview(binding, item):
         return None, "workflow-interview-unavailable:" + type(exc).__name__
 
 
+def _frame_gate_choice(interview, question, option):
+    """One frame interview option as the board's choice (label as value; `means` with the scope line as ever; its
+    own `description`; the scope line as `scope_note`, drawn once by `choice_descriptions`)."""
+    import frame_interview as FI
+    choice = {"value": option["label"], "label": option["label"]}
+    note = FI.route_scope_note(interview, question.get("id"), option["label"])
+    means = " ".join(part for part in (
+        option["means"] if isinstance(option.get("means"), str) else "", note) if part)
+    if means or isinstance(option.get("means"), str):
+        choice["means"] = means
+    if isinstance(option.get("description"), str) and option["description"].strip():
+        choice["description"] = option["description"].strip()
+    if note:
+        choice["scope_note"] = note
+    return choice
+
+
 def _workflow_gate_detail(binding, item):
     """Build selected-only questions from the current gate or its sealed interview."""
     route = binding["route"]
@@ -3372,14 +3671,7 @@ def _workflow_gate_detail(binding, item):
         for option in options:
             if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
                 continue
-            choice = {"value": option["label"], "label": option["label"]}
-            # The card's own words, then the one line the runtime reads from the proposal's structure.
-            means = " ".join(part for part in (
-                option["means"] if isinstance(option.get("means"), str) else "",
-                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
-            if means or isinstance(option.get("means"), str):
-                choice["means"] = means
-            choices.append(choice)
+            choices.append(_frame_gate_choice(interview, question, option))
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}
@@ -3487,22 +3779,18 @@ def _selected_base(ref):
         return None, "selected-wait-reference-invalid"
     # Message authority is its durable private source, not display-cache TTL.
     # The producer and collector remain read-only observers of that source.
-    if item_id.startswith("S4:"):
-        for path in state_root().glob("*.json"):
-            if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
-                continue
-            signal = _read(path)
-            if not signal or signal.get("mode") != "message" or signal.get("id") != item_id:
-                continue
-            base = _message_envelope(signal)
-            if any(values.get(key) not in (None, base[key]) for key in ("harness", "session_id")):
-                return None, "selected-item-identity-changed"
-            if not _selected_hints_match(values, base):
-                return None, "selected-message-reference-changed"
-            supplied = values.get("native_ref")
-            if supplied is not None and supplied != base["native_ref"]:
-                return None, "selected-message-binding-changed"
-            return base, None
+    signal = _find_message(item_id, values.get("harness"), values.get("session_id")) \
+        if item_id.startswith("S4:") else None
+    if signal:
+        base = _message_envelope(signal)
+        if any(values.get(key) not in (None, base[key]) for key in ("harness", "session_id")):
+            return None, "selected-item-identity-changed"
+        if not _selected_hints_match(values, base):
+            return None, "selected-message-reference-changed"
+        supplied = values.get("native_ref")
+        if supplied is not None and supplied != base["native_ref"]:
+            return None, "selected-message-binding-changed"
+        return base, None
     if cache is None:
         stored = _stored_workflow_action(ref)
         if stored is not None:
@@ -3769,11 +4057,11 @@ def _workflow_selected_transport(base):
         if signal is None:
             return {"state": "unknown", "reason": "message-question-no-longer-current"}
         current = _message_incarnation_current(signal)
-        state = "open" if signal.get("lifecycle") == "open" else "applied"
+        state = {"open": "open", "cancelled": "cancelled"}.get(signal.get("lifecycle"), "applied")
         entry = _selected_entry(base)
         if signal.get("completion") and entry and entry.get("action_id"):
             state = entry["state"]
-        return {"state": state if current or signal.get("completion") else "unknown", "kind": "question",
+        return {"state": state if current or state != "open" else "unknown", "kind": "question",
                 "request_id": signal["id"], "turn_id": None, "question_id": "message-response",
                 "detail": signal["detail"], "support": current and signal.get("lifecycle") == "open",
                 "result": entry.get("result") if entry else None,
@@ -3891,8 +4179,11 @@ def read_selected_request(ref):
     envelope = _selected_envelope(resolved_base, resolved)
     if envelope["state"] in {"submitted", "received", "applied", "cancelled", "expired"}:
         identity = _selected_identity(envelope)
+        previous = _selected_entry(envelope) if identity is not None else None
+        if previous is None and (envelope.get("native_ref") or {}).get("transport") == "hearting-message-answer":
+            identity = None   # a message question's end is its source's: reading it makes no answer slot
         if identity is not None:
-            previous = _selected_entry(envelope) or {"draft": "", "state": "open"}
+            previous = previous or {"draft": "", "state": "open"}
             if previous.get("state") != envelope["state"]:
                 previous["state"] = envelope["state"]
                 if envelope["state"] == "applied":
@@ -3929,6 +4220,13 @@ def write_selected_draft(ref, draft):
         return _selected_fallback(base, "selected-draft-invalid")
     envelope = dict(ref)
     envelope["selected_id"] = base["id"]
+    if (base.get("native_ref") or {}).get("transport") == "hearting-message-answer":
+        # A draft from a screen opened before its question ended makes no answer record of it again.
+        # No lock: a close landing between this read and the store below is not excluded.
+        lifecycle = (_message_source(base) or {}).get("lifecycle")
+        if lifecycle != "open":
+            return _selected_fallback(base, "message-question-no-longer-current", state={
+                "answered": "applied", "cancelled": "cancelled"}.get(lifecycle, "unknown"))
     previous = _selected_entry(envelope)
     if previous and (previous.get("state") in {"submitted", "received", "applied",
                                                 "cancelled", "expired"}
@@ -4753,6 +5051,9 @@ def _own_open_signal(harness, session_id):
     except OSError:
         return False
     now = time.time()
+    if any(row.get("lifecycle") == "open" and wait_fold(row["since"], now) is None for row in
+           (_read_questions_file(_questions_path(harness, session_id)) or {}).values()):
+        return True
     needle = json.dumps(session_id, ensure_ascii=False).encode("utf-8")   # as `_write` stores it
     for entry in entries:
         try:

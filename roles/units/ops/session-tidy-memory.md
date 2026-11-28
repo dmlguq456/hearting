@@ -75,6 +75,14 @@ only — no Markdown fence, no prose:
   `unresolved-obligation` (something promised or left open), or `artifact-pointer`
   (where the real content lives and why to look). Never copy a summary of a document,
   plan or report that already exists — point to it.
+- **Pick `tier` by how long the reason lasts.** Use `durable` only for what still holds
+  after the situation that prompted it changes. A direction given because of a passing
+  condition (this week's usage, limit, credit or time to reset of a harness, or a temporary
+  outage) goes to `working`, which expires, even when it is a `decision` or a
+  `user-correction`. Do not move such a `user_choices` answer to `durable`.
+- An `unresolved-obligation` is a promise a session in `sessions[]` made itself. A promise of
+  another session (another project's included) that the conversation only quotes or relays is
+  not this project's open work: do not record it, except what is itself a `decision` or an `artifact-pointer`.
 - Skip chatter, status narration, progress, anything already in `existing_records`,
   anything the user did not decide or correct, and anything that will not matter after
   three weeks. Empty `actions` is a correct answer.

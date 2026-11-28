@@ -51,6 +51,7 @@ import dispatch_notice_receipt as notice_receipt  # noqa: E402
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_RECEIPT_BYTES = 2048
 from dispatch_receipt_identity import COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS
+from dispatch_receipt_identity import legacy_parent_close_receipt
 
 
 class CompletionError(RuntimeError):
@@ -422,6 +423,11 @@ class NoticeWatcher:
             if not notice_receipt.is_notice(receipt):
                 return
             if queue_socket and self._historical_notice_receipt(record, storage_key):
+                return
+            if "answer_binding" in receipt:
+                # A person's answer goes by the peer courier, which carries its exact text and
+                # receipt; this queue would carry only its private marker. One an older watcher
+                # already queued is still observed above.
                 return
             capability = (
                 {"epoch": 1} if queue_socket
@@ -1188,14 +1194,15 @@ def _batch_client_id(thread_id: str, delivery_ids) -> str:
     return codex_queue_delivery.native_client_message_id(thread_id, delivery_ids, batch=True)
 
 
-def _batch_units(root: Path, thread_id: str, members: list[dict]) -> list[tuple[list[dict], str]]:
+def _batch_units(root: Path, thread_id: str, members: list[dict]) -> list[tuple[list[dict], list[str]]]:
     """Render a claimed sibling batch as one shared-header body, halving it only when it
     cannot fit one queue message. The attempts counter is pinned so every sibling sidecar
     and every pass renders the same bytes for the same members."""
     members = sorted(members, key=lambda record: record["delivery_id"])
     body = codex_queue_delivery.native_batch_unit_body(root, thread_id, members)
     if len(body.encode("utf-8")) <= QUEUE_BODY_LIMIT or len(members) == 1:
-        return [(members, body)]
+        legacy = codex_queue_delivery.native_batch_unit_body(root, thread_id, members, include_provider_failure=False)
+        return [(members, list(dict.fromkeys((body, legacy))))]
     middle = len(members) // 2
     return (_batch_units(root, thread_id, members[:middle])
             + _batch_units(root, thread_id, members[middle:]))
@@ -1256,7 +1263,7 @@ def _native_queue_delivery_once(
     if thread.get("cwd") and not isinstance(thread.get("cwd"), str):
         raise CompletionError("native-queue-thread-cwd-invalid")
     followup = completion_followup_text(receipt, jobs=str(args.jobs))
-    prior_followup = _prior_followup_text(followup)
+    legacy_followup = completion_followup_text(receipt, jobs=str(args.jobs), include_provider_failure=False)
     client_message_id = codex_queue_delivery.native_client_message_id(
         args.thread_id, [row.metadata.get("delivery_id", "") for row in rows])
     # The first batch read selected the queue. Re-read immediately before the
@@ -1297,12 +1304,10 @@ def _native_queue_delivery_once(
         codex_consumed_evidence, codex_queue_evidence, settle_native_receipt,
     )
     try:
-        context = codex_queue_delivery.native_completion_body(
-            args.thread_id, records, receipt, followup)
-        prior_context = (codex_queue_delivery.native_completion_body(
-            args.thread_id, records, receipt, prior_followup) if prior_followup else None)
+        contexts = codex_queue_delivery.native_completion_bodies(
+            args.thread_id, records, receipt, followup, legacy_followup)
     except Exception:  # noqa: BLE001 - malformed marker input cannot alter ACK dedupe.
-        context = prior_context = None
+        contexts = []
     acked_by = f"codex-native-queue:{client_message_id}"
     if all(record.get("state") in {"acked", "rejected", "expired"} for record in records) and any(
             record.get("state") != "acked" for record in records):
@@ -1333,10 +1338,9 @@ def _native_queue_delivery_once(
                          for record in records]
         if fresh_records and all(record and record.get("state") == "acked"
                                  for record in fresh_records):
-            if context is not None:
+            if contexts:
                 _retire_acked_native_copy(root, path, target, args.thread_id, fresh_records,
-                                          client_message_id,
-                                          [context] + ([prior_context] if prior_context else []), session)
+                                          client_message_id, contexts, session)
         return {
             "schema_version": 1, "status": "accepted", "thread_id": args.thread_id,
             "client_user_message_id": client_message_id,
@@ -1348,7 +1352,7 @@ def _native_queue_delivery_once(
     # The registered recipient owns the record; after an approved handover,
     # only the exact current successor may settle it. A predecessor's native
     # history is never promoted into the successor's receipt.
-    if context is None:
+    if not contexts:
         raise CompletionError("native-queue-marker-identity-invalid")
     native_threads = (target,) if target != args.thread_id else (args.thread_id,)
     previous_send_observed = any(
@@ -1356,14 +1360,13 @@ def _native_queue_delivery_once(
         or int(record.get("attempts") or 0) > 0
         for record in records)
     for native_thread in (native_threads if previous_send_observed else ()):
-        evidence = codex_queue_evidence(
-            endpoint=path, session_id=native_thread, delivery_id=client_message_id,
-            expected_message=context, timeout=5.0, session=session)
-        if (evidence is None or not evidence.get("bindings")) and prior_context is not None:
-            # A body queued before the follow-up was trimmed (exact full-body match).
+        evidence = None
+        for context in contexts:
             evidence = codex_queue_evidence(
                 endpoint=path, session_id=native_thread, delivery_id=client_message_id,
-                expected_message=prior_context, timeout=5.0, session=session) or evidence
+                expected_message=context, timeout=5.0, session=session)
+            if evidence and evidence.get("bindings"):
+                break
         if evidence is None:
             continue
         bindings = set(evidence.get("bindings") or ())
@@ -1629,13 +1632,11 @@ def _native_queue_delivery_once(
                     "thread_id": args.thread_id}
         own_ids = [record["delivery_id"] for record in records]
         if set(kept) == set(own_ids):
-            units = [([kept[i] for i in own_ids],
-                      [context] + ([prior_context] if prior_context else []),
-                      client_message_id)]
+            units = [([kept[i] for i in own_ids], contexts, client_message_id)]
         else:
-            units = [(unit_records, [body], _batch_client_id(
+            units = [(unit_records, bodies, _batch_client_id(
                 args.thread_id, [record["delivery_id"] for record in unit_records]))
-                for unit_records, body in _batch_units(root, args.thread_id, list(kept.values()))]
+                for unit_records, bodies in _batch_units(root, args.thread_id, list(kept.values()))]
         result = {"schema_version": 1, "status": "accepted", "thread_id": args.thread_id}
         pending_output = dict(kept)
         for unit_records, bodies, unit_client_id in units:
@@ -2157,7 +2158,7 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         request["gateway_epoch"] = args.gateway_epoch
     if args.binding_generation is not None:
         request["binding_generation"] = args.binding_generation
-    result = deliver_with_retry(args, request, stop_check=delivery_stop_check)
+    result = deliver_receipt(args, request, stop_check=delivery_stop_check)
     status = result.get("status")
     return result, {
         "accepted": 0,
@@ -2165,6 +2166,21 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "sent-ambiguous": 74,
         "rejected": 65,
     }.get(status, 65)
+
+
+def deliver_receipt(args: argparse.Namespace, request: dict[str, Any], *, stop_check=None) -> dict[str, Any]:
+    """Deliver one completion receipt to the managed gateway.
+
+    A gateway started before `cancelled` existed lives until its Codex session
+    ends, while this observer follows the installed release. Its typed refusal
+    of a settled parent close is answered once with the form it knows
+    (`success`, reason `cancelled-by-parent`), which it renders as settled."""
+    result = deliver_with_retry(args, request, stop_check=stop_check)
+    legacy = legacy_parent_close_receipt(request["receipt"])
+    if (legacy is not None and result.get("status") == "rejected"
+            and result.get("reason") == "receipt-child-contract-invalid"):
+        result = deliver_with_retry(args, {**request, "receipt": legacy}, stop_check=stop_check)
+    return result
 
 
 def _restore_obligation_arguments(record: dict) -> argparse.Namespace:

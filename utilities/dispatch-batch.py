@@ -829,6 +829,7 @@ def _persist_degradation(
     route_node: str | None,
     reason: str,
     detail: str,
+    **tier_fields: str,
 ) -> None:
     record_degradation(
         route_id=route.get("route_id"), route_node=route_node,
@@ -836,7 +837,7 @@ def _persist_degradation(
         fallback_hop=None, execution_surface="registered-headless",
         writer="dispatch-batch.py", kind="degradation",
         agent_home=agent_home,
-        reason=reason, detail=detail[:512],
+        reason=reason, detail=detail[:512], **tier_fields,
     )
 
 
@@ -912,6 +913,7 @@ def _persist_launched_degradation(
         route_node=None,
         reason=str(reason),
         detail=str(diagnostics.get("degradation_detail", "")),
+        **_group_tier_fields(results),
     )
 
 
@@ -944,6 +946,7 @@ def _persist_sole_gate_degradation(
             "gate authority off the quality-peer set"
         )[:512],
         sole_gate="degraded",
+        **_group_tier_fields(results),
     )
 
 
@@ -1214,7 +1217,7 @@ def assign_harnesses(
             policy = ROUTE_MODULE.DEFAULTS.restrict_harness_policy(policy, allowed)
         bands = ["primary", "relief", "last_resort"]
         threshold = policy.get("promote_relief_below", 0)
-        primary = [capacity.get(name) for name in policy.get("primary", [])]
+        primary = [CAPACITY.raw_headroom(capacity, name) for name in policy.get("primary", [])]
         primary = [value for value in primary if value is not None]
         if (
             policy.get("relief")
@@ -1279,7 +1282,7 @@ def assign_harnesses(
                 # 90%-used exclusion gate.
                 gate_order = (
                     gated_legs,
-                    -sum(float(capacity.get(row[0]) or 0) for row in rows),
+                    -sum(float(CAPACITY.raw_headroom(capacity, row[0])) for row in rows),
                 )
                 allocation_order = (
                     float(sum(counts.get(row[0], 0) for row in rows)),
@@ -1329,7 +1332,7 @@ def assign_harnesses(
                      usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90))
                      for row in rows]
             within_band_gate = (sum(gated),
-                -sum(float(capacity.get(row[0]) or 0) for row in rows) if all(gated) else 0.0)
+                -sum(float(CAPACITY.raw_headroom(capacity, row[0])) for row in rows) if all(gated) else 0.0)
         diversity_order = (0 if len(rows) == 2 and rows[0][0] != rows[1][0]
                            and not (worker_pin and pinned_legs) else
                            1 if len(rows) == 2 and not (worker_pin and pinned_legs) else 0)
@@ -2059,7 +2062,7 @@ def collect_wrapper(
 
 def wrapper_result(
     leg: dict[str, object], proc: subprocess.Popen, stdout: str, stderr: str,
-    *, completed_review: dict[str, object] | None = None,
+    *, completed_review: dict[str, object] | None = None, node: dict[str, object] | None = None,
 ) -> dict[str, object]:
     fields = output_fields(stdout + stderr)
     registered = fields.get("registered", "unknown")
@@ -2112,7 +2115,29 @@ def wrapper_result(
         **{key: fields[key] for key in
            ("model_profile", "model", "model_source", "model_diversity", "model_diversity_from")
            if fields.get(key)},
+        **(_leg_tier_note(node, leg, fields) if receipt_valid else {}),
     }
+
+
+def _leg_tier_note(node, leg, observed) -> dict[str, str]:
+    """`tier_note` for a selected-top leg whose worker resolved below top (a harness whose config puts
+    `top` on a lower tier, the same-harness pair included). ``observed`` is the exact attempt's own
+    launch: the wrapper receipt of a leg started now, or the registry row of a leg reused as it is."""
+    from model_profile import TIER_NOTE_KEY, tier_note  # reads nothing for a stage not selected at top
+    note = tier_note(node, harness=observed.get("adapter") or observed.get("harness") or leg.get("adapter"),
+                     observed=observed)
+    return {TIER_NOTE_KEY: note} if note else {}
+
+
+def _group_tier_fields(results) -> dict[str, str]:
+    """The group ledger row's copy of its legs' notes: the one selected-top leg (`MAX_TOP_LEGS`) by its
+    attempt id; {} when no realized leg has a note."""
+    noted = [result for result in results
+             if result.get("tier_note") and result.get("launch_state") in {"started", "existing"}]
+    if len(noted) == 1:
+        return {"tier_note": noted[0]["tier_note"], "attempt_id": str(noted[0].get("attempt_id") or "-")}
+    return {"tier_note": "; ".join(f"{result.get('attempt_id')}: {result['tier_note']}" for result in noted)} \
+        if noted else {}
 
 
 def existing_leg_result(
@@ -2260,6 +2285,10 @@ def existing_leg_result(
         "child_spawned": "0",
         "duplicate_attempt": "1",
     }
+    # A reused leg says what its exact attempt ran, as the start that launched it did.
+    noted = _leg_tier_note(next((candidate for candidate in route.get("nodes", [])
+                                 if isinstance(candidate, dict) and candidate.get("id") == leg["node"]), None),
+                           leg, metadata)
     if fields[1] in {"open", "running"} and claimed == "1":
         process = attempt_process_quiescence(metadata)
         if (
@@ -2283,6 +2312,7 @@ def existing_leg_result(
             "check": "ok",
             "launch_state": "existing",
             "reason": "existing-active-attempt",
+            **noted,
         }
     if fields[1] == "done" and claimed == "1" and metadata.get("note") == "completed-review-blocking":
         # Identity above and the common terminal observer both have to agree;
@@ -2310,7 +2340,7 @@ def existing_leg_result(
                     "reason": "existing-terminal-review-unverified"}
         return {**common, "check": "ok", "launch_state": "existing",
                 "reason": "existing-terminal-review", "review_verdict": "FAIL",
-                "terminal_note": metadata["note"], "review_artifact": str(artifact)}
+                "terminal_note": metadata["note"], "review_artifact": str(artifact), **noted}
     if (
         fields[1] == "done"
         and claimed == "1"
@@ -2354,6 +2384,7 @@ def existing_leg_result(
                     "check": "ok",
                     "launch_state": "existing",
                     "reason": "existing-completed-attempt",
+                    **noted,
                 }
             readiness_state = readiness.state
             terminal_reason = readiness.reason
@@ -3991,7 +4022,10 @@ def main(argv: list[str] | None = None) -> int:
                                 replaced_attempt_id=str(partial["failed_source_attempt_id"]) if partial else "")
                             if checked and checked.get("review_verdict") == "FAIL":
                                 completed_review = checked
-                        result = wrapper_result(leg, proc, stdout, stderr, completed_review=completed_review)
+                        result = wrapper_result(
+                            leg, proc, stdout, stderr, completed_review=completed_review,
+                            node=next((item for item in route.get("nodes") or ()
+                                       if isinstance(item, dict) and item.get("id") == leg["node"]), None))
                         if result["launch_state"] == "existing":
                             checked = existing_leg_result(
                                 jobs,

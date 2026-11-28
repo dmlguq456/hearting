@@ -106,8 +106,10 @@ class AnswerRowWithoutObservationTest(unittest.TestCase):
         retained = [{"id": row["id"], "revision": row["revision"]} for row in shown]
         self.gap()
         self.assert_answerable_with_choices(self.board(retained))
-        # Its session registers another one: the old request is gone, the new one is not listed yet.
+        # Its session withdraws it (`questions close`) beside a second one: the old request is gone,
+        # the new one is not listed yet.
         self.f.ask(sid=SID, text="a second question", choices=["x", "y"])
+        waits.close_message("claude", SID, self.f.seat("claude", SID).key, shown[0]["id"])
         self.assertFalse([row for row in self.board(retained) if row.get("answerable") is True])
         # Or the session's own input answers it (a choice's number typed in the session) and closes it.
         self.assertTrue(waits._refresh_cache())
@@ -145,7 +147,7 @@ class AnswerRowWithoutObservationTest(unittest.TestCase):
         gap = self.project(retained)
         for rows in self.drawn(first, gap):
             self.assertTrue(any(row.startswith("› ") for row in rows), "\n".join(rows))
-            self.assertEqual(sum(1 for row in rows if "choice" in row and row.strip()[:1] in "▸123"), 3, "\n".join(rows))
+            self.assertEqual(sum(1 for row in rows if "choice" in row and row.strip()[:1] in "▶123"), 3, "\n".join(rows))
             self.assertFalse(any("closed" in row for row in rows), "\n".join(rows))
 
     def test_an_answer_before_the_next_observation_says_why_and_goes_after_it(self):

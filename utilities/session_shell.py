@@ -23,6 +23,11 @@ HARNESSES = frozenset(("claude", "codex", "opencode"))
 SCHEMA = "hearting-session-shell-v1"
 MAX_RECORD_BYTES = 8192
 MAX_CONTROL_BYTES = 64 * 1024
+# A line that carries the native screen: the host's readiness/payload requests to its backend and
+# its `screen` answer, the whole frame (host.cjs SCREEN_BYTES is the same number). Past it the host
+# answers `screen-large` instead of sending the screen; no screen is ever cut to fit.
+MAX_SCREEN_BYTES = 1024 * 1024
+SCREEN_REQUESTS = frozenset({"readiness", "payload"})
 _SID = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 
 
@@ -299,6 +304,13 @@ def release_behind(binding: dict) -> bool | None:
 # session whose state is not known.
 ANSWER_WAIT_OLD_SHELL = "old-shell"
 ANSWER_WAIT_NO_SHELL = "no-shell"
+# A window whose screen is too large to read (``screen-large``), and the same for an older host than
+# this release (``old-shell-large``): it refuses its own screen request past 64 KiB before reading it,
+# so it says only ``unobserved``; made smaller once (or reopened), it reads and moves to this release.
+HOLD_SCREEN_LARGE = "screen-large"
+HOLD_OLD_SHELL_LARGE = "old-shell-large"
+# The request an older host builds of its screen, and the most it sends.
+_OLD_HOST_REQUEST_BYTES = 65536
 # Fleet's session states (``fleet.model.classify_session``) of a session that rests: idle, never
 # used, or silent past the session window with its process alive.
 RESTING_STATES = frozenset({"idle", "unused", "stale"})
@@ -314,7 +326,25 @@ def answer_delivery_wait(harness: str, sid: str, state: str | None = None) -> st
     binding, reason = exact_binding(harness, sid)
     if binding is None:
         return ANSWER_WAIT_NO_SHELL if harness == "claude" and reason == "attachment-unavailable" else ""
+    # The courier's last reading of this window, kept on its waiting messages (``held``): a size the
+    # window cannot read is the cause, whatever release it runs.
+    held = _size_held(harness, sid)
+    if held:
+        return held
     return ANSWER_WAIT_OLD_SHELL if release_behind(binding) else ""
+
+
+def _size_held(harness, sid):
+    """The size word a message still waiting for this session was last held on, else ``""``."""
+    try:
+        rows = _peer_message()._pending_rows(recipient={"harness": harness, "session_id": sid})
+        for row in rows:
+            held = str(((row or {}).get("held") or {}).get("reason") or "")
+            if (row or {}).get("state") == "pending" and held in (HOLD_SCREEN_LARGE, HOLD_OLD_SHELL_LARGE):
+                return held
+    except Exception:  # noqa: BLE001 - an unreadable store names no cause
+        pass
+    return ""
 
 
 def mark_answer_waits(items, states=None):
@@ -374,6 +404,27 @@ PASSTHROUGH = "passthrough"
 SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learned `screen`
 SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
 SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
+SCREEN_LARGE = "shell-screen-large"            # too large a screen for one answer: its input box is not read
+
+
+def screen_lines(screen):
+    """``(lines, "")`` for a screen the host sent, as ``(char, faint)`` cell rows, else ``(None, why)``.
+
+    The host sends every native row, each up to its last non-blank cell; the judgments read it whole."""
+    if not isinstance(screen, list):
+        return None, "screen-unavailable"
+    rows = []
+    for runs in screen:
+        if not isinstance(runs, list):
+            return None, "screen-unavailable"
+        line = []
+        for run in runs:
+            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
+                    or type(run[1]) is not bool):
+                return None, "screen-unavailable"
+            line.extend((char, run[1]) for char in run[0])
+        rows.append(line)
+    return rows, ""
 
 
 def native_screen(binding: dict):
@@ -398,24 +449,14 @@ def native_screen_reason(binding: dict):
             return PASSTHROUGH, ""
         if result.get("reason") == "unsupported-operation":
             return None, SCREEN_HOST_OUTDATED
+        if result.get("reason") == "screen-large":
+            return None, SCREEN_LARGE
     if isinstance(result, dict) and result.get("ok") and result.get("focused") is True:
         return None, SCREEN_EDITOR_OPEN
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
-    if not isinstance(screen, list) or len(screen) > 512:
-        return None, SCREEN_NO_ANSWER
-    lines = []
-    for runs in screen:
-        if not isinstance(runs, list):
-            return None, SCREEN_NO_ANSWER
-        line = []
-        for run in runs:
-            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
-                    or type(run[1]) is not bool):
-                return None, SCREEN_NO_ANSWER
-            line.extend((char, run[1]) for char in run[0])
-        lines.append(line)
-    return lines, ""
+    lines, _why = screen_lines(screen)
+    return (lines, "") if lines is not None else (None, SCREEN_NO_ANSWER)
 
 
 def open_panel(harness: str, sid: str) -> dict:
@@ -451,12 +492,13 @@ def control(binding: dict, operation: str, **fields) -> dict:
             started = True
             stream.sendall(raw)
             response = bytearray()
+            limit = MAX_SCREEN_BYTES if operation == "screen" else MAX_CONTROL_BYTES
             while b"\n" not in response:
-                chunk = stream.recv(min(4096, MAX_CONTROL_BYTES + 1 - len(response)))
+                chunk = stream.recv(min(65536, limit + 1 - len(response)))
                 if not chunk:
                     raise ValueError("incomplete control response")
                 response.extend(chunk)
-                if len(response) > MAX_CONTROL_BYTES:
+                if len(response) > limit:
                     raise ValueError("control response too large")
             result = json.loads(response.partition(b"\n")[0])
             if (not isinstance(result, dict) or any(result.get(key) != val for key, val in identity.items())):
@@ -514,6 +556,8 @@ def _hold(binding, status):
     A host from before that word names only its state; an older release than the one installed
     takes the message once its window is reopened or typed in (``old-shell``)."""
     hold = status.get("hold") if status.get("ok") else ""
+    if hold == "unobserved" and release_behind(binding) and _old_host_screen_large(binding):
+        return HOLD_OLD_SHELL_LARGE
     if isinstance(hold, str) and hold:
         return hold
     if status.get("state") == "blocked":
@@ -521,6 +565,16 @@ def _hold(binding, status):
     if status.get("state") in ("working", "submitting"):
         return "busy"
     return ANSWER_WAIT_OLD_SHELL if status.get("ok") and "hold" not in status and release_behind(binding) else "unobserved"
+
+
+def _old_host_screen_large(binding):
+    """True when an older host's own screen request is past what it sends (64 KiB), measured on its
+    ``screen`` answer: the request it builds carries the same rows with its binding."""
+    result = control(binding, "screen")
+    if not result.get("ok") or not isinstance(result.get("screen"), list):
+        return False
+    request = {"id": 1, "op": "readiness", "binding": binding, "screen": result["screen"], "state": "idle"}
+    return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()) + 1 > _OLD_HOST_REQUEST_BYTES
 
 
 def deliver_pending(ref: str, harness: str, sid: str) -> dict:
@@ -870,7 +924,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
         owner = item.get("owner") or {}
-        if ((item.get("id") in ids or item.get("answer") == "sent") and not item.get("stale")
+        if ((item.get("id") in ids or item.get("answer") == "sent" and item.get("source") != "S3") and not item.get("stale")
                 and owner.get("harness") == harness and owner.get("session_id") == sid):
             current.add(item.get("id"))
             described = questions.describe(item, now=time.time())
@@ -880,13 +934,14 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
                 receipts.append(described)
             elif elsewhere is not None:
                 elsewhere.append(described)
-    result = (answerable + receipts)[:8]
+    # Every question by its full id: the count and the popup's `i/N` and Tab reach the last one.
+    result = answerable + receipts
     # A current wait left out above stays out: a retained display reference keeps only a
     # question that has left this session's waits (its receipt), never one judged here.
     known = {item["id"] for item in result} | current
     listed = {item.get("id") for item in view.get("items", ())}
-    for old in list(retained or ())[:8]:
-        if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
+    for old in list(retained or ()):
+        if not isinstance(old, dict) or old.get("id") in known:
             continue
         if not isinstance(old.get("id"), str) or not re.fullmatch(r"S[1-4]:[A-Za-z0-9:_-]{1,256}", old["id"]):
             continue
@@ -1152,6 +1207,8 @@ def _observe_session(observe, harness, sid, pid, start):
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
                     "zone_direct", "zone_dispatch", "zone_request",
+                    # 11-27: a zone rule's line, the zone's hue dimmed.
+                    "zoned_direct", "zoned_dispatch", "zoned_request",
                     # 11-18: the five fields' hues for a route's kind word (`kind_`) and its bracket (dim, plain, bold).
                     *("kind%s_%s" % (weight, field) for field in ("code", "lab", "design", "docs", "research")
                       for weight in ("", "q", "s", "b")),
@@ -1181,6 +1238,20 @@ def _panel_read_target(harness, sid, native_pid, native_start):
     return sid, native_pid, native_start, None
 
 
+def styled_parts(parts, *, colors=256, no_color=False) -> list:
+    """``(text, key)`` parts as the panel paints them: the text and its key's look, plus a role where
+    the panel reads one."""
+    from fleet.palette import style_components
+    from fleet.session_line import fresh_part
+    from fleet.session_block import CHOICE_DETAIL
+    # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+    # rest of the Git words where it shows no hue (mono, eight colors). A choice's words under its
+    # name (11-27) are marked so the editor keeps them dim on the chosen choice's rows.
+    return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+             **({"role": "git-fresh"} if fresh_part(text, key) else
+                {"role": "choice-detail"} if key == CHOICE_DETAIL else {})} for text, key in parts]
+
+
 def block_labels(editor: int) -> dict:
     """The question block's words for a popup of ``editor`` cells (the editor and the tests read the same)."""
     from fleet.config import ui_text
@@ -1190,7 +1261,9 @@ def block_labels(editor: int) -> dict:
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+        "more_page", "more_choices", "sent", "questions", "paste_stalled", "pasting")}
+    # A sent answer this window has not taken because its screen is too large to read (host `lastHold`).
+    labels["hold_screen_large"] = ui_text("peer.delivery.hold_screen_large")
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)
@@ -1217,13 +1290,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments, fresh_part
+    from fleet.session_line import line_segments
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count, recent_memory
+    from fleet.session_work import observe as observe_work, open_count, recent_memory, shown_records
     from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, resource_rows, usage_rows
     from fleet.session_line import peer_message_rows
     read_sid, read_pid, read_start, parked = _panel_read_target(harness, sid, native_pid, native_start)
@@ -1293,10 +1366,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
         colors = 1 << 24
     def styled(parts):
-        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
-        # rest of the Git words where it shows no hue (mono, eight colors).
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
-                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
+        return styled_parts(parts, colors=colors, no_color=no_color)
     segments = styled(line_segments(values, columns))
     # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, five at most (11-16; the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work
@@ -1305,8 +1375,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     work, work_paths = observe_work(values.get("cwd"),
                                     tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
     if memory_rows:
-        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
-                                   for row in memory_rows]
+        values["memory_recent"] = shown_records(memory_rows, work)
         values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
     watched.extend(memory_paths)
@@ -1378,8 +1447,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     quota_raw = panel["quota"]
     for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp", "cost"):
         panel[name] = styled(panel[name])
+    panel["context_gauges"] = [styled(parts) for parts in panel["context_gauges"]]
     # Spec E9 rule 59 (11-16): the USAGE section, the three harnesses' usage rows (the records Fleet keeps).
-    panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"])} for row in usage_rows(harness, values)]
+    panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"]), "columns": row["columns"]} for row in usage_rows(harness, values)]
     # 11-16 (review of #1662): a reading at Fleet's red level carries `level: red`, so the folded strip can keep it
     # (the strip lets the other windows go first) in the place the old notice row gave it.
     panel["quota"] = [{**part, "level": "red"} if key == "lvl_r" else part
@@ -1445,7 +1515,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # 11-18: the RESOURCES section (the compute hosts' CPU, memory and GPU use and the numbers of the sessions that hold a GPU): the
     # sample the shared producer already took, in the cache read above (no read of its own).
     panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]],
-                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]]}
+                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]],
+                           "brief": [styled(item) for item in row["brief"]]}
                           for row in resource_rows(view.get("resources"), time.time())]
     for request in panel["requests"]:
         # Painted as a route's doer is: the same harness, model and effort keys.
@@ -1505,7 +1576,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
                       "labels": labels, "styles": {**{key: style_components(key, colors=colors, no_color=no_color)
                       for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")},
-                      # The chosen choice's `▸` takes this session's harness color (spec E9 rule 53).
+                      # The chosen choice's `▶` takes this session's harness color (spec E9 rule 53).
                       "harness": style_components("hb_" + str(harness), colors=colors, no_color=no_color)}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
@@ -2033,51 +2104,50 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        # Fleet's route page with every line of it (the popup reads a longer page on with PgUp/PgDn,
-        # so no line is folded into `+N more`): the grid is as tall as the window's rows and the
-        # visibility lines together; its stage frame takes what the window's rows leave, never less
-        # than a 36-row window leaves (a lower window reads the page on instead).
-        room = request.get("rows") if type(request.get("rows")) is int and 6 <= request["rows"] <= 200 else 30
-        room = max(room, 30)
-        route = next(item for item in routes if str(item.get("id")) == opened)
-        grid = CellGrid(columns, room + 3 + sum(pages._route_visibility_rows(route.get("visibility"), 0, columns - 1)))
-        subset = replace(vm, routes=routes)
-        pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
-                          pages._SubsetState(None, "route:" + opened, opened, True), whole=True)
-    elif routes:
+        return _route_page_answer(replace(vm, routes=routes), opened, columns, kind, ids, read_at, colors, no_color,
+                                  request.get("framed") is True)
+    if routes:
         pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
     rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-    # The route page starts under Fleet's page head: its empty rows above the content go.
-    while page and rows and not rows[0]:
-        rows.pop(0)
-        hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
-    if page:
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page,
-                "read_at": int(read_at)}
     return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False,
                         read_at=int(read_at))
+
+
+def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color, framed):
+    """A route's page as the host reads it (the host fits it to the window and reads the rest with PgUp/PgDn). Its frame stands first
+    where the host's first screen showed that frame (``framed``) and the whole page then fits the answer (``POPUP_ROWS`` rows and
+    ``POPUP_ANSWER_BYTES``); else it is the answer as before 11-27, byte for byte (the lines first, the frame under them; one past what
+    the held reader takes is read the one-shot way, as it always was). Drawn twice at most."""
+    from fleet.explorer.grid import CellGrid
+    from fleet.explorer import pages
+
+    def draw(frame_first):
+        grid = CellGrid(columns, POPUP_ROWS + 8)
+        end = pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
+                                pages._SubsetState(None, "route:" + opened, opened, True), whole=True, frame_first=frame_first)
+        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        # The route page starts under Fleet's page head: its empty rows above the content go.
+        while rows and not rows[0]:
+            rows.pop(0)
+            hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": True,
+                "read_at": int(read_at)}, end
+
+    def weight(result):
+        return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
+    if framed:
+        answer, end = draw(True)
+        if end is not None and end <= POPUP_ROWS and weight(answer) <= POPUP_ANSWER_BYTES:
+            return answer
+    return draw(False)[0]
 
 
 def _input_readiness(binding, request):
     """Use the ordinary form/draft judgment on this PTY's parsed native cells."""
     from peer_steward_duties import _screen_ready
-    screen = request.get("screen")
-    if not isinstance(screen, list) or len(screen) > 256:
-        return {"ok": False, "reason": "screen-unavailable"}
-    lines, count = [], 0
-    for runs in screen:
-        if not isinstance(runs, list):
-            return {"ok": False, "reason": "screen-unavailable"}
-        line = []
-        for run in runs:
-            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
-                    or type(run[1]) is not bool):
-                return {"ok": False, "reason": "screen-unavailable"}
-            count += len(run[0])
-            if count > 64 * 1024:
-                return {"ok": False, "reason": "screen-unavailable"}
-            line.extend((char, run[1]) for char in run[0])
-        lines.append(line)
+    lines, why = screen_lines(request.get("screen"))
+    if lines is None:
+        return {"ok": False, "reason": why}
     reason = _screen_ready(binding["harness"], lines)
     idle = request.get("state") == "idle"
     if binding["harness"] == "claude":
@@ -2234,9 +2304,12 @@ def _backend() -> int:
     for line in sys.stdin:
         request = {}
         try:
-            if len(line.encode()) > MAX_CONTROL_BYTES:
+            size = len(line.encode())
+            if size > MAX_SCREEN_BYTES:
                 raise ValueError("request too large")
             request = json.loads(line)
+            if size > MAX_CONTROL_BYTES and request.get("op") not in SCREEN_REQUESTS:
+                raise ValueError("request too large")
             result = _backend_operation(request)
         except Exception:
             result = {"ok": False, "reason": "source-unavailable"}

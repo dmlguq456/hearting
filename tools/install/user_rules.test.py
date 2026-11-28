@@ -116,6 +116,25 @@ class UserRulesSwitchTest(unittest.TestCase):
             self.assertFalse(user_rules.carry_enabled(environ))
             self.assertEqual(user_rules.switch_path(environ), str(switch))
 
+    def test_off_holds_in_a_rejected_file_with_a_nested_carry(self):
+        # 2026-11-28: when the file failed to parse, a nested `opencode: carry`
+        # under another `user_rules` key was read as the switch and wrote the block.
+        with tempfile.TemporaryDirectory(prefix="user-rules-switch-") as temporary:
+            claude = Path(temporary) / ".claude"
+            (claude / "rules").mkdir(parents=True)
+            (claude / "rules/external.md").write_bytes(RULE)
+            switch = Path(temporary) / "dispatch-defaults.yaml"
+            environ = {"DISPATCH_DEFAULTS_CONFIG": str(switch)}
+            broken = "schema_version: 4\nallocation:\n  depth_affinity: {}\n    window: 30\n"
+            nested = "  note:\n    opencode: carry\n"
+            for text in (broken + "user_rules:\n  opencode: off\n" + nested,
+                         broken + "user_rules.opencode: off\nuser_rules:\n" + nested):
+                with self.subTest(text=text):
+                    switch.write_text(text)
+                    self.assertEqual(user_rules.block(claude, environ), b"")
+            switch.write_text(broken + "user_rules:\n  opencode: on\n  note:\n    opencode: off\n")
+            self.assertEqual(user_rules.block(claude, environ).count(RULE), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

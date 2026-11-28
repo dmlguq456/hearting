@@ -47,8 +47,8 @@ Choose purpose and sequence in every folder; Git status only changes placement.
 Small non-Git document corrections use direct in place; multi-step document
 work uses the frame, retaining known deadlines and writer responsibilities.
 Keep code and document results at their stated project path (default cwd),
-from the first draft; keep plans, reviews, versions and target references in
-`.agent_reports`.
+from the first draft. Resolve the artifact root with `utilities/artifact-root.sh`
+for plans, reviews, versions and target references.
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
 `AGENT_HOME`, else the installed release. Flags are hints; honor a shape the
@@ -56,8 +56,9 @@ person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
-a short check or lookup adds `--ephemeral` (no record, §0.2.1).
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`
+(`general/explore`); a short check or lookup adds `--ephemeral` (no record,
+§0.2.1). Claude/Codex start native subagent calls this way when sure.
 
 ## Following the runtime
 
@@ -112,9 +113,8 @@ dispatch depth, model role, tests, safety, or validation.
 - Compute hosts: `compute-hosts`, `~/.config/hearting/compute-hosts.yaml`; receipts show GPU headroom
 - This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
-Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
-write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
-is only a fallback. For runtime-surface or parity changes, check current
+Linked worktrees use the primary checkout's canonical artifact root.
+For runtime-surface or parity changes, check current
 official documentation, then the local realization and its fallback; never
 infer support from another adapter.
 

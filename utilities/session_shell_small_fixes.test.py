@@ -231,12 +231,13 @@ for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['
  assert(v.motion&&v.motion.cells.length===36&&v.motion.cells.every(c=>c.row===rule&&c.col>=2&&c.col<=37),'the default light moves over the rule alone\n'+tag);
  assert(lines[rule+1].includes('MODEL'),tag);
  if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
- // No title and no NOW: no separate empty row stands under CTX, the next thing (the question's box) stands right under it.
+ // No title and no NOW: no separate empty row stands under MODEL (11-27: its row ends in the context reading, no CTX row), the next thing
+ // (the question's box) stands right under it.
  if(name==='none'){
   const q={count:1,label:'QUESTIONS',answerable:true,rows:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],one:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],line:[p('어느 쪽?',{foreground:253})],choices:0};
   const asked=view.render({width:40,height:30,side:true,fill:true,model:{...base,wait:'◑답 대기 1',styles:{...styles,g_blocked:{foreground:217}}},state:'idle',sid:'s',harness,frame:0,brief:()=>q,sent:()=>[],configuration:{},background:''}).rows.map(str);
-  const ctx=asked.findIndex(r=>/^│  CTX /.test(r));
-  assert(ctx>0&&/^│ ╭/.test(asked[ctx+1]),'no separate empty row under CTX without a title\n'+asked.join('\n'));
+  const ctx=asked.findIndex(r=>/^│  MODEL .* 46% │$/.test(r));
+  assert(ctx>0&&/^│ ╭/.test(asked[ctx+1])&&!asked.some(r=>/^│  CTX /.test(r)),'no separate empty row under MODEL without a title\n'+asked.join('\n'));
  }
 }
 // The bottom layout has none (the border alone is bright).

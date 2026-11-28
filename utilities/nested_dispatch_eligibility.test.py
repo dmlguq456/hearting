@@ -4,6 +4,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
 import importlib.util
+import json
 import os
 import tempfile
 import subprocess
@@ -60,6 +61,18 @@ class NestedEligibilityTest(unittest.TestCase):
              mock.patch.object(N.subprocess, "run", return_value=result):
             self.assertEqual(N.auth_check("codex"), (True, ""))
 
+    def test_codex_auth_accepts_an_api_key_status_line(self):
+        # Codex 0.171.0 prints an API key login this way (measured in an isolated home).
+        result = mock.Mock(returncode=0, stdout="API key configured - sk-fixt***-key\n"
+                           "Authentication is checked when you send a request.\n", stderr="")
+        with mock.patch.object(N.shutil, "which", return_value="/bin/codex"), \
+             mock.patch.object(N.subprocess, "run", return_value=result):
+            self.assertEqual(N.auth_check("codex"), (True, ""))
+        result = mock.Mock(returncode=0, stdout="Not logged in\n", stderr="")
+        with mock.patch.object(N.shutil, "which", return_value="/bin/codex"), \
+             mock.patch.object(N.subprocess, "run", return_value=result):
+            self.assertEqual(N.auth_check("codex"), (False, "auth-unavailable"))
+
     def test_codex_auth_still_requires_zero_exit_with_valid_status_line(self):
         result = mock.Mock(
             returncode=1,
@@ -79,6 +92,46 @@ class NestedEligibilityTest(unittest.TestCase):
             with mock.patch.object(N.shutil, "which", return_value="/bin/opencode"), \
                  mock.patch.object(N.subprocess, "run", return_value=result):
                 self.assertEqual(N.auth_check("opencode"), (True, ""))
+
+    def test_opencode_auth_list_never_inherits_the_callers_session_shell(self):
+        with tempfile.TemporaryDirectory() as worktree:
+            base = Path(worktree)
+            record = base / "received.json"
+            opencode = base / "opencode"
+            opencode.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "if sys.argv[1:] != ['auth', 'list']:\n"
+                "    sys.exit(2)\n"
+                f"with open({str(record)!r}, 'w', encoding='utf-8') as out:\n"
+                "    json.dump(dict(os.environ), out)\n"
+                "print('OpenCode Go  API key  stored')\n",
+                encoding="utf-8",
+            )
+            opencode.chmod(0o755)
+            kept = {
+                "HOME": str(base / "home"),
+                "XDG_CONFIG_HOME": str(base / "config"),
+                "XDG_DATA_HOME": str(base / "data"),
+                "XDG_STATE_HOME": str(base / "state"),
+                "XDG_CACHE_HOME": str(base / "cache"),
+                "OPENCODE_CONFIG_DIR": str(base / "opencode-config"),
+                "FIXTURE_CARRIED": "kept-by-auth-list",
+            }
+            caller = {
+                **kept,
+                "PATH": str(base),
+                "HEARTING_SHELL_SOCKET": str(base / "control.sock"),
+                "HEARTING_SHELL_TOKEN": "fixture-token",
+                "HEARTING_SHELL_DIRECTORY": str(base / "window"),
+                "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+            }
+            with mock.patch.dict(os.environ, caller, clear=True):
+                self.assertEqual(N.auth_check("opencode", worktree), (True, ""))
+                self.assertEqual(dict(os.environ), caller)
+            received = json.loads(record.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(key for key in received if key.startswith("HEARTING_SHELL_")), [])
+            self.assertEqual({key: received.get(key) for key in kept}, kept)
 
     def test_opencode_auth_rejects_listing_without_stored_credential(self):
         for returncode, output in ((0, ""), (0, "No credentials\n"), (1, "OpenCode Go  API key  stored\n")):

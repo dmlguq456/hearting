@@ -11,8 +11,9 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import unittest
 from unittest.mock import patch
 
-from tools.fleet.explorer import live
+from tools.fleet.explorer import live, pages
 from tools.fleet.explorer.frame import draw
+from tools.fleet.explorer.grid import CellGrid
 from tools.fleet.explorer.state import NavState
 from tools.fleet.explorer.tables import _harness_mix
 from tools.fleet.explorer.view_model import ExplorerViewModel
@@ -137,6 +138,12 @@ def _staged_after_frame_vm():
 
 
 class FrameOwnerLevelTests(unittest.TestCase):
+    def test_the_fixed_frame_keeps_its_joints_where_the_panel_meets_its_bottom(self):
+        _view_value, _record_value, route, vm = _vm()
+        grid = CellGrid(100, 24)
+        pages.draw_route_detail(grid, vm, route, 0, 98, 10, bottom=16)
+        self.assertEqual((grid.cells[16][2][0], grid.cells[16][96][0]), ("╧", "╧"))
+
     def test_a_sealed_route_frame_record_displays_as_frame_without_a_default_suffix(self):
         view, record, route, vm = _vm()
         self.assertEqual(route["capability"], "frame")

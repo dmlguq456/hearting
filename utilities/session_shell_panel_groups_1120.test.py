@@ -108,9 +108,9 @@ const g=headAt(ls,/^ GIT /),pe=headAt(ls,/^ PEERS /),st=headAt(ls,/^ STATUS +›
 assert(/^│  REPO   hearting \(branch ✓\)  wt 12 +│$/.test(all[1]),all[1]);
 assert(g<0&&!ls.some(l=>/SESSION/.test(l)),ls.join('\n'));
 assert(pe===2&&st===3&&se===4&&mo===se+1,ls.join('\n'));   // (index 0 is the frame's top line, 1 the REPO row)
-// The SESSION group: MODEL, CTX, TITLE, NOW, then QUESTIONS, the route box, MESSAGES, MEM.
-const order=[/^ MODEL /,/^ CTX /,/^ TITLE /,/^ NOW /,/^╭─ 1 QUESTIONS/,/^╭─ 2 ROUTE/,/^MESSAGES/,/^MEM +›$/].map(re=>headAt(ls,re));
-assert(order.every((y,k)=>y>se&&(!k||y>order[k-1])),order+'\n'+ls.join('\n'));
+// The SESSION group: MODEL (11-27: the context reading at its right end, no CTX row), TITLE, NOW, then QUESTIONS, the route box, MESSAGES, MEM.
+const order=[/^ MODEL .* 41%$/,/^ TITLE /,/^ NOW /,/^╭─ 1 QUESTIONS/,/^╭─ 2 ROUTE/,/^MESSAGES/,/^MEM +›$/].map(re=>headAt(ls,re));
+assert(order.every((y,k)=>y>se&&(!k||y>order[k-1]))&&order[1]===mo+1&&headAt(ls,/^ CTX /)<0,order+'\n'+ls.join('\n'));
 // Only the STATUS head opens the status popup; GIT, PEERS and the SESSION head open nothing.
 assert.deepEqual(v.hits.filter(h=>h.action==='popup:STATUS').map(h=>h.row),[st]);
 assert(!v.hits.some(h=>[1,pe,se].includes(h.row)&&h.action!=='fold'),JSON.stringify(v.hits));
@@ -193,7 +193,7 @@ assert(!view.memoryBody({model:{styles,memory_items:[{text:'a\u001b[31mb',body:'
 for(const status of [undefined,{word:'STATUS',has_doc:false},doc([]),doc(GROUPS)]){
   const ws=lines(draw({status,side:false,width:100,height:12,routes:3,messages:5}));
   assert(ws.some(l=>/^│ messages \+4 ─+ › │$/.test(l))&&ws.some(l=>/^│ ← \[75\] /.test(l)),JSON.stringify(status)+'\n'+ws.join('\n'));
-  assert(ws.some(l=>/^│ ╭─ route 3 /.test(l))&&ws.some(l=>/↓2 ─╯ │$/.test(l)),ws.join('\n'));}
+  assert(ws.some(l=>/^│ ╭─ route 3 /.test(l))&&ws.some(l=>/↓ 2 more ─╯ │$/.test(l)),ws.join('\n'));}
 // Short of rows the route box (the job that runs now) stays and the button stays on the first row: 100 x 8..14, one route.
 for(let h=8;h<=14;h++){
   const v=draw({status:doc(GROUPS),side:false,width:100,height:h,routes:1}),ws=lines(v);

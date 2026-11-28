@@ -27,14 +27,22 @@ _SENT_STATES = frozenset({"submitted", "received", "applied"})
 
 # What an answer still on its way waits for, in the person's words (``session_shell.answer_delivery_wait``):
 # an older shell takes it once its window is reopened or typed in (the window's own `새 판 대기`), a Claude
-# window outside the shell at the next prompt typed there.
+# window outside the shell at the next prompt typed there, a window whose screen is too large once it is smaller.
 _ANSWER_WAIT_WORDS = {"old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
-                      "no-shell": ("fleet.session_block.wait_no_shell",)}
+                      "no-shell": ("fleet.session_block.wait_no_shell",),
+                      # The window's screen is too large to read: the words its waiting messages carry.
+                      "screen-large": ("peer.delivery.hold_screen_large",),
+                      "old-shell-large": ("peer.delivery.hold_old_shell_large",)}
 
 
 # What a drawn value may not carry, whatever draws it (Fleet's grid drops these; the panel may not):
 # C0/C1 controls (ESC, NUL), DEL and the bidirectional overrides and isolates.
 _UNDRAWABLE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+# A choice's words under its name (11-27, design 가): drawn dim (`style.KEY_ALIASES`); the panel's editor
+# knows them by this key's role (`choice-detail`) and keeps them dim on the chosen choice's rows too.
+CHOICE_DETAIL = "choice_detail"
 
 
 def _drawable(value):
@@ -191,8 +199,9 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
         heading = [("" if native_wait is not None else "◑ ", key), *count,
                    (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key)]
         source = []
-        choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"
-                   else question.get("choices") or [])
+        decision = item.get("answer_kind") == "decision"
+        choices = ["approve", "reject", "defer"] if decision else question.get("choices") or []
+        described = () if decision else question.get("descriptions") or ()
         options = []
         # The choice's own number; `number` stays the box's `i` of `i/N`.
         for choice_number, choice in enumerate(choices, 1):
@@ -203,8 +212,15 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
             if question.get("recommended") == choice_number - 1:
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
             # Two cells stay free before the number for the editor's mark column (spec E9 rule 53).
-            for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix) - 2))):
+            room = max(1, width - cell_width(prefix) - 2)
+            for line_index, line in enumerate(wrap_parts(parts, room)):
                 options.append([(prefix, "g_blocked") if line_index == 0 else (" " * cell_width(prefix), "dim"), *line])
+            # 11-27 (design 가): the choice's words on the rows under its name, from its name's first cell,
+            # dim (`CHOICE_DETAIL`); they belong to the choice as its name's own rows do.
+            words = str(described[choice_number - 1] or "") if choice_number <= len(described) else ""
+            for said in filter(str.strip, map(_drawable, words.splitlines())):
+                for line in wrap_parts([(said, CHOICE_DETAIL)], room):
+                    options.append([(" " * cell_width(prefix), "dim"), *line])
         body = []
         # 11-15: a markdown table in the question's text reads as aligned columns (the documents' one
         # table rule, ``transcript.table_parts``); every other line wraps as before.

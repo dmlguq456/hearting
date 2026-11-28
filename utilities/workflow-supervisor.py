@@ -4821,6 +4821,39 @@ def cmd_status(args):
     payload["owner_completion_delivery"] = (
         owner_completion_delivery(route, route_file, registry_path, rows=registry_rows)
         if registry_rows is not None else None)
+    from dispatch_attempt_policy import provider_failure_kind
+    provider_failures = []
+    identity = (route["route_id"], route.get("route_hash"))
+    for row in registry_rows or ():
+        if row["status"] != "done":
+            continue
+        meta = row["meta"]
+        if identity not in ((meta.get("route_id"), meta.get("route_hash")),
+                            (meta.get("owner_route_id"), meta.get("owner_route_hash"))):
+            continue
+        kind = provider_failure_kind(meta.get("provider_failure_kind"))
+        if kind:
+            provider_failures.append({"attempt_id": meta.get("attempt_id"), "node": meta.get("route_node"),
+                                      "harness": meta.get("harness"), "provider_failure_kind": kind})
+    if provider_failures:
+        payload["provider_failures"] = provider_failures
+    # A stage the person selected at `top` that ran below it: what was selected and what ran.
+    from model_profile import TIER_NOTE_KEY, top_stage_selected, top_stage_tier_notes
+    tier_notes = []
+    if any(top_stage_selected(node) for node in route.get("nodes") or ()):
+        from dispatch_degradation import route_rows as degradation_rows
+        tier_notes = top_stage_tier_notes(
+            route, rows=[row["meta"] for row in registry_rows or ()],
+            degradations=degradation_rows(route["route_id"], jobs=registry_path))
+    if tier_notes:
+        payload["tier_notes"] = tier_notes
+    try:  # what the owner types for a next step it runs itself, or what that command still lacks
+        import worker_bootstrap as WB
+        steps = {node["id"]: WB.human_run_step(route, route_file, node)
+                 for node in route.get("nodes") or () if node.get("id") in next_stage}
+    except Exception:
+        steps = {}
+    payload["next_steps"] = {node: line for node, line in steps.items() if line}
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
@@ -4832,6 +4865,8 @@ def cmd_status(args):
         print(f"owner      {owner.get('attempt_id') or '-'} {owner.get('liveness')} reason={owner.get('reason')}")
         print(f"stage      current={payload['current_stage'] or '-'} "
               f"next={payload['next_stage'] or '-'}")
+        for line in payload["next_steps"].values():
+            print(f"next step  {line}")
         print(f"terminal   {terminal_nodes} gates="
               f"{ {k: v['passed'] for k, v in gates.items()} }")
         for child in payload["resource_children"]:
@@ -4842,6 +4877,8 @@ def cmd_status(args):
         for item in payload["owner_completion_delivery"] or []:
             if item["state"] in PENDING.OPEN_STATES or item["state"] == "expired":
                 print(f"delivery   {item['attempt_id']} {item['state']} {item['reason']}")
+        for item in tier_notes:
+            print(f"tier       {item['node']} {item[TIER_NOTE_KEY]}")
     return 0
 
 

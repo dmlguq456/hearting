@@ -23,6 +23,7 @@ from dispatch_contract import (  # noqa: E402
     codex_standard_owner_network_enabled,
     ensure_global_registry_writable,
 )
+from environment_inheritance import inherited_environment  # noqa: E402
 
 # WHOSE RUNTIME THIS PROBE DESCRIBES
 # ---------------------------------
@@ -99,10 +100,13 @@ def resolve_parent_sandbox(parent_harness: str, requested: str) -> tuple[str, st
 
 
 def codex_login_status(output: str) -> bool:
-    """Accept a valid status line without letting unrelated warnings reorder it."""
+    """Accept a valid status line without letting unrelated warnings reorder it.
+
+    An account login reads `Logged in using ...`; from Codex 0.171.0 an API key reads
+    `API key configured - <masked key>` (earlier `Logged in using an API key - ...`)."""
 
     return any(
-        line.strip().startswith("Logged in")
+        line.strip().startswith(("Logged in", "API key configured"))
         for line in output.splitlines()
         if line.strip()
     )
@@ -131,6 +135,7 @@ def auth_check(child_harness: str, worktree: str | Path | None = None) -> tuple[
     contain account metadata. A live nested request is still kept as a release
     smoke test; this gate is the cheap per-route check.
     """
+    env = None
     if child_harness == "codex":
         command = ["codex", "login", "status"]
         accepted = codex_login_status
@@ -144,6 +149,7 @@ def auth_check(child_harness: str, worktree: str | Path | None = None) -> tuple[
     elif child_harness == "opencode":
         command = ["opencode", "auth", "list"]
         accepted = opencode_auth_listed
+        env = inherited_environment()
     else:
         return False, "unknown-harness"
     if shutil.which(command[0]) is None:
@@ -156,6 +162,7 @@ def auth_check(child_harness: str, worktree: str | Path | None = None) -> tuple[
         result = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             text=True,
             capture_output=True,
             check=False,

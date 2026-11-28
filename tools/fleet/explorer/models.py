@@ -21,6 +21,21 @@ def _cut(text, width):
     return "".join(out)
 
 
+def _command_lines(command, width):
+    """Wrap at spaces, splitting a token only when it exceeds a full row."""
+    if width < 2:
+        return [command]
+    lines = []
+    while cell_width(command) > width:
+        line = _cut(command, width)
+        boundary = command.rfind(" ", 0, len(line) + 1)
+        if boundary > 0:
+            line = line[:boundary]
+        lines.append(line)
+        command = command[len(line):].lstrip(" ")
+    return lines + [command]
+
+
 def _dict(value):
     return value if isinstance(value, Mapping) else {}
 
@@ -351,7 +366,7 @@ def _model_picker(grid, x, y, right, items, current, chosen, labels, values, off
         item = found[index]
         on = _same_model(item, active)
         here = _same_model(item, current)
-        mark = "▸ " if editing and index == cursor else "  "
+        mark = "▶ " if editing and index == cursor else "  "    # 11-27: the place, as MODELS' own selected cell reads it
         cursor_x = grid.put(x - 2, yy, mark, "soft", limit=right)
         text = str(item)
         label = str(labels.get(item, ""))
@@ -920,8 +935,19 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     extra = PICK_ROWS if picking else 0
     box = (_box_plan(view, harness, profile, shown, values, current_effort) if view is not None else None)
     extra_rows = box["rows"] if box else 0           # the status lines and the follow row
-    box_top, box_bottom = y, y + 8 + extra + extra_rows
-    box_left = x + 1
+    box_top, box_left = y, x + 1
+    command_x = box_left + 5
+    draft = box["requested"] if box else None
+    if draft:
+        changed = False
+        command = f"hearting model set {harness} {box['cell']['target']} {draft}"
+        command_lines = _command_lines(command, right - command_x)
+    else:
+        command = f"hearting model set {harness} profile/{profile} {model_choice}@{effort_choice}"
+        command_lines = [command]
+    command_y = box_top + extra_rows + 6 + extra
+    pool_y = command_y + len(command_lines)
+    box_bottom = pool_y + 1
     for col in range(box_left + 1, right):
         grid.put(col, box_top, "─", "line")
         grid.put(col, box_bottom, "─", "line")
@@ -943,9 +969,6 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     catalog = _dict(_dict(data.get("catalog_sources")).get(harness))
     missing_current = (current_model and catalog.get("state") in ("available", "empty")
                        and not any(_same_model(item, current_model) for item in harness_choices))
-    draft = box["requested"] if box else None            # a keep / follow / undo waiting for [ apply ]
-    if draft:
-        changed = False
     if draft and box["word"] == "undo":
         grid.put(now_end + 2, y + 1, "→", "line", limit=right)
         _model_cell(grid, now_end + 5, y + 1, harness,
@@ -977,21 +1000,16 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     effort_options += (("runtime-default",) if harness == "opencode" else ())
     _chips(grid, box_left + 12, y + 4 + extra, effort_options, current_effort, values.get("ui:effort"), "effort",
            right - 2)
-    command = f"hearting model set {harness} profile/{profile} {model_choice}@{effort_choice}"
-    if draft:
-        command = f"hearting model set {harness} {box['cell']['target']} {draft}"
-    command_y = y + 6 + extra
     grid.put(box_left + 3, command_y, "$ ", "line")
-    edge = right                   # the box's right border is column ``right``: nothing crosses it
-    # the two buttons follow the command on its row and stay inside the box; a long model id
-    # gives up the command's tail, never the buttons
-    dry_x = min(box_left + 5 + cell_width(command) + 3, right - 25)
+    command_end = command_x + cell_width(command)
+    dry_x = min(command_end + 3, right - 25)
     button_y = command_y
-    if draft and dry_x < box_left + 5 + cell_width(command) + 3:
-        # a keep / follow / undo command is shown whole: its buttons take the row above when they do not fit beside it
-        dry_x, button_y = box_left + 5, command_y - 1
-    grid.put(box_left + 5, command_y, command, "soft" if changed or draft else "dim",
-             limit=dry_x - 2 if (changed or draft) and button_y == command_y else edge)
+    if draft and dry_x < command_end + 3:
+        # A follow draft has the full row when its buttons move above it.
+        dry_x, button_y = command_x, command_y - 1
+    command_limit = dry_x - 2 if (changed or draft) and button_y == command_y else right
+    for row, line in enumerate(command_lines, command_y):
+        grid.put(command_x, row, line, "soft" if changed or draft else "dim", limit=command_limit)
     if draft:
         actions = (("models.apply", harness, "follow", box["cell"]["target"], draft, True),
                    ("models.apply", harness, "follow", box["cell"]["target"], draft, False))
@@ -999,28 +1017,28 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
         actions = (("models.apply", harness, "profile", profile, model_choice, effort_choice, True),
                    ("models.apply", harness, "profile", profile, model_choice, effort_choice, False))
     if changed or draft:
-        grid.put(dry_x, button_y, "[ dry-run ]", "title_dim", limit=edge)
+        grid.put(dry_x, button_y, "[ dry-run ]", "title_dim", limit=right)
         grid.add_hit(button_y, dry_x, dry_x + 11, actions[0])
         apply_x = dry_x + 11 + 2
-        grid.put(apply_x, button_y, "[ apply ]", "chip_on", limit=edge)
+        grid.put(apply_x, button_y, "[ apply ]", "chip_on", limit=right)
         grid.add_hit(button_y, apply_x, apply_x + 9, actions[1])
-    y += 10 + extra
     if slim:
-        grid.put(box_left + 3, box_top + 7 + extra + extra_rows, "pool", "label")
+        grid.put(box_left + 3, pool_y, "pool", "label")
         pool = pools.get(profile)
         if pool:
             order, note = pool
             pool_order = order[0] if order and isinstance(order[0], (list, tuple)) else order
-            cursor = grid.put(box_left + 12, box_top + 7 + extra + extra_rows, " › ".join(pool_order), "soft",
+            cursor = grid.put(box_left + 12, pool_y, " › ".join(pool_order), "soft",
                               limit=right - 2)
             if note:
-                grid.put(cursor, box_top + 7 + extra + extra_rows, "  " + note, "dim", limit=right - 2)
+                grid.put(cursor, pool_y, "  " + note, "dim", limit=right - 2)
         else:
-            grid.put(box_left + 12, box_top + 7 + extra + extra_rows, "route-sealed explicit choice only", "dim", limit=right - 2)
+            grid.put(box_left + 12, pool_y, "route-sealed explicit choice only", "dim", limit=right - 2)
     foot = "models.conf → .bak backup · new sessions and launches only · routes keep their depth, launches read this table"
     grid.put(box_left + 2, box_bottom, " ", "branch_s")
     grid.put(box_left + 3, box_bottom, foot, "dim", limit=right)
     grid.put(min(right - 1, x + 96), box_bottom, " ", "branch_s")
+    y = box_bottom + 2
     beside = grid.cols - x - 2 - left > 70
     context_end = 3
     if beside:

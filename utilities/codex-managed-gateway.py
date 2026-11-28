@@ -76,7 +76,10 @@ FLEET_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 from dispatch_receipt_identity import CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS
 ALLOWED_RECEIPT_KEYS = CANONICAL_RECEIPT_KEYS | {"delivery_timing"}
 ALLOWED_CHILD_KEYS = CANONICAL_CHILD_KEYS
-from dispatch_receipt_identity import COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS
+from dispatch_receipt_identity import (
+    COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS,
+    TERMINAL_CLASSIFICATIONS, completion_classification,
+)
 AGENT_HOME = Path(__file__).resolve().parents[1]
 
 
@@ -1234,7 +1237,7 @@ class ManagedGateway:
             if pending:
                 if (
                     existing is None
-                    or existing.get("source") == "codex-appserver"
+                    or existing.get("source") in ("codex-appserver", "codex-question")
                 ):
                     fleet_interaction.set_wait(
                         thread_id,
@@ -1247,7 +1250,7 @@ class ManagedGateway:
                         turn_id=(pending[0].turn_id if len(pending) == 1 else None),
                         item_id=(pending[0].item_id if len(pending) == 1 else None),
                     )
-            elif existing and existing.get("source") == "codex-appserver":
+            elif existing and existing.get("source") in ("codex-appserver", "codex-question"):
                 retired = self._retired_appserver_requests.get(
                     (thread_id, request_key(existing.get("request_id"))), {})
                 reason = {"applied": "answered", "received": "answered",
@@ -2416,11 +2419,9 @@ class ManagedGateway:
                     and status != "done"
                 )
                 or harness not in (*WRAPPER_PARENT_HARNESSES, "unknown")
-                or delivery_state not in {"success", "attention"}
-                or (
-                    delivery_state == "success"
-                    and required_action != "advance-completed"
-                )
+                or delivery_state not in TERMINAL_CLASSIFICATIONS
+                or (delivery_state in {"success", "cancelled"} and required_action != "advance-completed")
+                or (delivery_state == "cancelled" and raw.get("reason") != "cancelled-by-parent")
                 or (
                     delivery_state == "attention"
                     and required_action == "advance-completed"
@@ -2455,11 +2456,7 @@ class ManagedGateway:
                     raise GatewayError("receipt-child-next-leg-invalid")
                 child["next_leg"] = next_leg
             children.append(child)
-        aggregate = (
-            "success"
-            if children and {child["delivery_classification"] for child in children} == {"success"}
-            else "attention"
-        )
+        aggregate = completion_classification(children)
         if receipt.get("delivery_classification") != aggregate:
             raise GatewayError("receipt-delivery-classification-invalid")
         try:

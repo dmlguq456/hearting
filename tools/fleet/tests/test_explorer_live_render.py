@@ -768,7 +768,7 @@ class HeaderCallerFallback(unittest.TestCase):
         self.assertIn("…", row)
         self.assertIn("⠏ 15", row)
         self.assertIn("● 2", row)
-        self.assertIn("● 1", row)
+        self.assertIn("◑ 1", row)
         self.assertIn("hearting v3.50.3-20-gad247e2b6 · unmanaged", row)
         self.assertRegex(row.rstrip(), r"\d{2}:\d{2}$")
         self.assertEqual(cell_width(row), 80)

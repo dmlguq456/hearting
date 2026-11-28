@@ -266,7 +266,7 @@ class DrawnAnswerRules(unittest.TestCase):
                 event = {"type": "key", "key": key, "tabs": ["QUESTIONS", "OVERVIEW"]}
             state, _ = reducer(state, event)
         rows = draw(vm, state, 100, 35).text_rows()
-        marks = [n for n in (1, 2, 3) if any(f"▸ {n}  항목 {n}" in line for line in rows)]
+        marks = [n for n in (1, 2, 3) if any(f"▶ {n}  항목 {n}" in line for line in rows)]
         before = state
         state, effects = reducer(state, {"type": "key", "key": "enter",
                                           "question_refs": [row["ref"] for row in vm.questions]})
@@ -357,7 +357,7 @@ class DrawnAnswerRules(unittest.TestCase):
                     self.assertEqual({k: v for k, v in answers.items() if v},
                                      {"q1": ["q1-1"], "q2": ["q2-1"]})
                     rows = draw(vm, state, 100, 40).text_rows()
-                    self.assertFalse(any("_understanding 선택 1" in row and "▸" in row for row in rows))
+                    self.assertFalse(any("_understanding 선택 1" in row and "▶" in row for row in rows))
             else:
                 with self.subTest(harness=harness, ids=ids, keys="all answered then same number"):
                     state, _, answers = run(["1", "1", "1"])
@@ -433,7 +433,7 @@ class DrawnAnswerRules(unittest.TestCase):
                               questions=[dict(spec, id=qid) for qid in ids])
                 state = replace(state, question_overlay=dict(overlay, detail=detail))
                 enter = {"type": "key", "key": "enter", "question_refs": [overlay["ref"]]}
-                self.assertFalse(any("▸ 2  항목" in row for row in draw(vm, state, 100, 24).text_rows()))
+                self.assertFalse(any("▶ 2  항목" in row for row in draw(vm, state, 100, 24).text_rows()))
                 self.assertEqual(reduce(state, enter)[1], (("questions.read", overlay["ref"]),))
                 picked, _ = reduce(state, {"type": "key", "key": "2"})
                 self.assertEqual(reduce(picked, enter)[1], ())
@@ -462,7 +462,7 @@ class DrawnAnswerRules(unittest.TestCase):
         state = replace(state, question_overlay=overlay)
         rows = _text(vm, state)
         self.assertTrue(any("> v2" in row for row in rows))
-        self.assertFalse(any("▸ 2  항목" in row for row in rows))
+        self.assertFalse(any("▶ 2  항목" in row for row in rows))
         _, effects = reduce(state, {"type": "key", "key": "enter"})
         self.assertEqual(effects[0][2], {"answers": {"q": ["v2"]}})
 
@@ -490,7 +490,7 @@ class DrawnAnswerRules(unittest.TestCase):
         overlay["draft"] = {"answers": {"q": ["v2", "가나"]}}
         state = replace(state, question_overlay=overlay)
         rows = draw(vm, state, 100, 35).text_rows()
-        self.assertTrue(any("▸ 3  항목 3" in row for row in rows))
+        self.assertTrue(any("▶ 3  항목 3" in row for row in rows))
         _, effects = reduce(state, {"type": "key", "key": "enter"})
         self.assertEqual(effects[0][2]["answers"]["q"], ["v3", "가나"])
         self.assertEqual(self.sequence(["text: " ])[:2], ([], None))
@@ -521,7 +521,7 @@ class DrawnAnswerRules(unittest.TestCase):
         self.assertEqual(self.sequence(["text:가나"], choices=[])[:2], ([], ["가나"]))
         state, vm = self.setup_question(is_other=False)
         rows = draw(vm, state, 100, 35).text_rows()
-        self.assertFalse(any("▸ 2  항목" in row for row in rows))
+        self.assertFalse(any("▶ 2  항목" in row for row in rows))
         self.assertTrue(any("○ 2  항목" in row for row in rows))
         unchanged, effects = reduce(state, {"type": "key", "key": "t"})
         self.assertEqual((unchanged, effects), (state, ()))
@@ -674,17 +674,21 @@ class MessageQuestions(unittest.TestCase):
         state, effects = reduce(state, {"type": "key", "key": "text:keep this draft"})
         for effect in effects:
             state, _ = self.effect(state, effect, vm)
-        newer, _ = self.f.ask("claude", text="replacement")
-        newer_vm, _ = self.board(newer)
-        # The rendered stale row cannot send. Its private draft survives replacement.
+        newer, _ = self.f.ask("claude", text="another question")
+        # 3a: another question of the session is added beside it; this request and its draft stay.
         from tools.fleet import render
         from tools.fleet.explorer.state import _question_action_ref
         ref = _question_action_ref(state.question_overlay)
-        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", newer_vm):
+        current = waits.read_selected_request(envelope)
+        self.assertEqual((current["state"], current["support"]["supported"]), ("open", True))
+        self.assertIn("keep this draft", waits._selected_entry(envelope)["draft"])
+        # Withdrawn by its asker, the rendered row cannot send.
+        waits.close_message("claude", old["session_id"], old["seat_key"], old["id"])
+        closed_vm, _ = self.board(newer)
+        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", closed_vm):
             self.assertFalse(render._explorer_question_ref_current(ref))
         result = waits.submit_selected_response(ref, {"answers": {"message-response": ["late"]}})
         self.assertFalse(result["support"]["supported"])
-        self.assertIn("keep this draft", waits._selected_entry(envelope)["draft"])
         self.assertIsNone(self.f.record(old))
 
 

@@ -14,6 +14,7 @@ import io
 from types import SimpleNamespace
 from pathlib import Path
 import tempfile
+import unittest
 from unittest import mock
 
 import human_wait_state as waits
@@ -65,6 +66,10 @@ class MessageQuestionFixture:
         seat = self.seat(harness, sid)
         signal = waits.register_message(harness, sid, seat, text,
             sequence=tidy.read_prompt_seq(seat), cwd=str(self.root), **kwargs)
+        # The shared store the running producer keeps; a question alone adds no answer record to it.
+        with waits._cache_write_lock():
+            if not waits._cache_path().exists():
+                waits._write_cache_value(waits._projection_or_new())
         return signal, waits.read_selected_request({"id": signal["id"], "harness": harness, "session_id": sid})
 
     def submit(self, envelope, text="PRIVATE-ANSWER-SENTINEL", action="fixture-action"):
@@ -72,9 +77,18 @@ class MessageQuestionFixture:
             {"answers": {"message-response": [text]}}, action_id=action)
 
     def record(self, signal):
-        delivery = "delivery-" + __import__("hashlib").sha256(
-            ("notice\0question-answer:" + signal["id"]).encode()).hexdigest()
-        return pending.read(self.root, signal["session_id"], delivery)
+        """The delivery of the question's current answer: the question's own key, or, after an
+        earlier answer's delivery ended without arriving, the later answer's own (``notify``)."""
+        sha = lambda text: __import__("hashlib").sha256(text.encode()).hexdigest()
+        key = "notice\0question-answer:" + signal["id"]
+        found = pending.read(self.root, signal["session_id"], "delivery-" + sha(key))
+        entry = waits._selected_entry({"harness": signal["harness"], "session_id": signal["session_id"],
+                                       "request_id": signal["id"], "question_id": "message-response",
+                                       "turn_id": None}) or {}
+        action = entry.get("action_id")
+        if action and (found is None or found["receipt"]["answer_binding"]["action_id"] != action):
+            return pending.read(self.root, signal["session_id"], "delivery-" + sha(key + "\0" + action)) or found
+        return found
 
     display = False   # True: the receiver has shown it reads the short forms, the producer's line is sealed
     shell = True      # False: the session has no shell host, so its rows wait for its own callbacks
@@ -219,7 +233,8 @@ class MessageQuestionFixture:
             name = "message_question_codex_hook"
         else:
             if not self.node:
-                raise RuntimeError("Node is unavailable for the OpenCode callback fixture")
+                # A host without node cannot run the plugin's own call: the OpenCode case is skipped, not failed.
+                raise unittest.SkipTest("Node is unavailable for the OpenCode callback fixture")
             # `chat.message` first asks the guidance its system context carries, with the very
             # Python call written in the plugin, then receives the text.
             plugin = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
@@ -490,7 +505,7 @@ process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messag
         context of every model call, the tool results, the session history and the count after
         each step."""
         if not self.node:
-            raise RuntimeError("Node is unavailable for the OpenCode plugin fixture")
+            raise unittest.SkipTest("Node is unavailable for the OpenCode plugin fixture")
         root = Path(tidy.__file__).resolve().parents[1]
         source = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
         start = source.index("function ownNativePaneOrigin() {")

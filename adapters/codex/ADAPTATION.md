@@ -285,6 +285,46 @@ spawn as `agent type is currently not available`. The agent keeps its reasoning
 effort and sandbox and follows the session model (PG-52). Keep your own
 agents under other names.
 
+A person's session's `spawn_agent` call becomes a `general/explore` unit route when that is certain
+(H1, `capabilities/unit.md`, A native subagent call): `hooks.json` registers
+`adapters/codex/hooks/pretooluse-subagent-redirect.py` on `PreToolUse` matcher `spawn_agent` (timeout
+180 s), which runs the shared `utilities/native_subagent_redirect.py --codex`. It decides once, before
+anything is registered, and denies the native call with the route's line once the start receipt holds it
+(running, waiting for a free worker, or ended). `run-hook.sh` turns any failure of this one bridge (a
+partial install without it, a file removed after the check, a crash) into a silent exit 0, because Codex
+reads exit 2 with stderr as a refusal; the other bridges keep their exit codes. Certain means: the role
+Codex picks for the name is Hearting's shipped file (apart from the rendered `model` and
+`model_reasoning_effort` lines; every role option is compared) or a built-in (`default`, `worker`,
+`explorer`); a role is named by its file's `name` field, a higher config layer replaces a lower one, and a
+user role overrides a built-in, so any project, system or `[agents.<name>]` definition of the name, or a
+`config_file` an `[agents.*]` role names whose `name` is it, leaves the call native; no other `PreToolUse`
+handler in `hooks.json` or inline `[hooks]` of any layer or plugin matches the call, by `spawn_agent` or by
+its alias `Agent` (https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/tools/hook_names.rs;
+in a linked worktree the main checkout's project layer is read too,
+https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/config/src/loader/mod.rs), and Hearting's own
+command, compared exactly, is registered once, because matching handlers run concurrently and any deny wins
+(https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/hooks/src/engine/dispatcher.rs,
+`hooks/src/events/pre_tool_use.rs`); the `codex` process that runs the hook (read from `/proc`) was started
+without `-c`/`--config`, `--profile` or `--enable`/`--disable`; the call is the multi-agent v1 form with only
+`agent_type`, `message` and a false `fork_context` (no `items`, model, effort or history; a v2
+`collaborationspawn_agent` call runs no Hearting hook, since v2 checks its own arguments after the hook,
+`core/src/tools/handlers/multi_agents_v2/spawn.rs`); and the thread's state DB holds its row (a missing or
+failing DB, or one without the thread, counts as unknown). Measured on Codex 0.171.0 in isolated TUI and
+`codex exec` homes: the hook fires for `spawn_agent` (tool input `agent_type`, `message`). The public
+reports that the hook is not invoked for `spawn_agent` (openai/codex#49736) did not reproduce here. A hook
+that exits 1, is killed, prints garbage or runs past its timeout lets the native call run; exit 2 with
+stderr blocks it. The `codex login status` line an API key prints from 0.171.0 (`API key configured - …`)
+is read as a login (`utilities/nested-dispatch-eligibility.py`).
+
+When an open session takes a changed `hooks.json`: Codex builds a session's hook set when the session
+starts (`core/src/session/mod.rs`), and in the measured 0.171.0 TUI a file change alone left the open
+session on its old set (its next `spawn_agent` still ran natively). The upstream source also has an
+explicit refresh of an existing session's hook configuration; this adapter does not run it and its effect
+was not measured. A new session reads the new file, and a hook whose definition changed runs only once it
+is trusted again (`/hooks`, https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks; runtime activation
+trusts Hearting's own definitions). A `hooks.json` from before this registration has no `spawn_agent`
+entry, so a session opened with it calls natively.
+
 Sub-agent role default (PG-13). Codex gives a `spawn_agent` call with no `model`
 and an agent whose file names none (the built-in `default`, `worker`, `explorer`,
 and a spawn with no `agent_type`) the parent session's model. Codex reads
@@ -422,7 +462,7 @@ Harness-specific status signals still need Codex-native realization:
 | oncall/note/study/drill/runtime-watch loop nudges | `preflight.sh briefing` plus `preflight.sh loop-info <loop>` for loop-specific support/fallback status |
 | merge/rebase/merged-branch risk | `preflight.sh status` reports git operation, branch and worktree risks without blocking writes. |
 | cycle checkpoint at turn end | `adapters/codex/hooks/stop-lifecycle.py` calls `artifact_checkpoint_trigger.launch_for_session("codex", <session id>)` for main and worker alike: a worker names its cycle in `AGENT_ARTIFACT_*`, an interactive session is found through its route-chain ledger. The detached `artifact_producer.py checkpoint --trigger turn-end` child refreshes an open cycle's interim manifest and, bounded and lock-free, observes closed cycles for changed files (§45 D-124). `AGENT_ARTIFACT_CHECKPOINT=off` starts nothing. When native Stop is not enabled or trusted, the checked fallbacks are the existing stage-complete and supervisor-poll triggers, `begin` (a named parent or a resumed cycle) and the explicit `artifact_producer.py checkpoint`; no trust setting or parity gate is added |
-| fleet (multi-agent) observability | Fleet is a pure reader of registry and neutral sidecars. Each registered dispatch wrapper attaches an exact-attempt summary supervisor before releasing the worker launch fence; the supervisor owns early, debounced, and final updates even when Fleet is closed, and `dispatch-reconcile --apply` repairs a missing owner only for an exact live attempt. Interactive Codex `UserPromptSubmit`, Stop, and SessionEnd hooks trigger the same shared producer independently of Fleet. Interaction waits remain separate: `PermissionRequest` publishes approval wait and native `PostToolUse` plus turn/session boundaries release it without changing approval ownership. |
+| fleet (multi-agent) observability | Fleet is a pure reader of registry and neutral sidecars. Each registered dispatch wrapper attaches an exact-attempt summary supervisor before releasing the worker launch fence; the supervisor owns early, debounced, and final updates even when Fleet is closed, and `dispatch-reconcile --apply` repairs a missing owner only for an exact live attempt. Interactive Codex `UserPromptSubmit`, Stop, and SessionEnd hooks trigger the same shared producer independently of Fleet. Interaction waits remain separate: `PermissionRequest` publishes approval wait and native `PostToolUse` plus turn/session boundaries release it without changing approval ownership. `PreToolUse(request_user_input[_async])` (`pretooluse-question-redirect.py`) carries the shared redirect's three outcomes like Claude's: a registered or unknown question is refused with one line; a question it lets through (registration failed before any write, no same question read) is published first as a `codex-question` decision wait (observation only: one that cannot be written does not hold the question back), so the shared wait list, Fleet and the panel count it until that tool's `PostToolUse` or the next prompt clears it, or the managed gateway replaces it with its own request's wait and clears that at the answer (the async tool's own `PostToolUse` comes at once; its question then shows only through a readable live rollout). |
 
 observability caveat: Codex keeps native `/statusline` ownership of model,
 context, limits, and footer monitoring. Fleet does not own summary generation or

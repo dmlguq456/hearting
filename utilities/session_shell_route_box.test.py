@@ -84,7 +84,10 @@ for(const c of golden.cases){
  // A who row (mark, role word, harness, model, effort, `CTX`) keeps only its head `● owner` / `↳ ⠋ worker`; the lines that
  // only a session has under it (the golden's gauge and tool rows, a drawn NOW) leave; a stage line stays whole.
  const textOf=r=>r.map(([t])=>t).join('');
- const whoHead=r=>{const t=textOf(r),m=/^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
+ // Below the configured minimum width the new context column can clip the hanging worker's role.
+ // In those renders compare its indent and mark, which are still part of the reference.
+ const whoHead=r=>{const t=textOf(r),m=c.side&&c.width<32&&/^(│ +↳ \S)/.exec(t)||
+  /^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
   const out=[];let n=0;const want=[...m[1]].length;
   for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
   return out;};
@@ -166,7 +169,7 @@ for(const [side,width,height] of [[true,40,60],[true,54,46],[false,120,20]]){
  const first=id=>v.hits.find(h=>h.action==='popup:ROUTE:'+id).row,last=id=>v.hits.filter(h=>h.action==='popup:ROUTE:'+id).at(-1).row;
  assert(first('rt-1111111111111111')===b.a+2&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
  assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length>=2,label);
- assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length===2,label);
+ assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→←✓✕] \[/.test(s)).length===2,label);
  // Nothing opens in place any more.
  assert(!v.hits.some(h=>/^(route|request|message|read)[:-]|^route$/.test(h.action)),JSON.stringify(v.hits));
 }
@@ -199,7 +202,7 @@ context.set({top:4,bottom:12,offset:0,max:0,step:3},0);context.mouse(65,93+1+10,
 const many={...golden.scenes.na,routes:Array.from({length:6},(_,i)=>({...golden.scenes.na.routes[1],id:'rt-'+String(i).repeat(16),title:'route '+i})),route_count:6,route_total:6};
 const at=s=>pv.render({width:40,height:18,side:true,fill:true,model:many,state:'working',configuration:{},routeScroll:s});
 const top=at(0),down=at(2);assert(top.routeArea&&top.routeArea.max>0,JSON.stringify(top.routeArea));
-assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑2 ›─╮/.test(s)),down.rows.map(txt).join('\n'));
+assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑ 2 more ›─╮/.test(s)),down.rows.map(txt).join('\n'));
 assert.equal(down.routeArea.offset,2);
 """)
 
@@ -217,8 +220,8 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  // (Short of rows the rules go first: the 32-cell panel here draws none, the others the one `request` rule.)
  const rules=rows.slice(b.a+1,b.b).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length;
  assert(rules<=1&&(width!==40&&width!==120||rules===1),label);
- // The two request rows stand in the box, once each (`◂ [e7] 검토 요청…`, `→ [52] frames…`).
- const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
+ // The two request rows stand in the box, once each (`← [e7] 검토 요청…`, `→ [52] frames…`).
+ const requestRow=s=>/^│ │ (← \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
@@ -230,6 +233,8 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
 const first=body.findIndex(s=>s.includes('검토 요청: 팝업 바탕')),msg=body.findIndex(s=>s.includes('[e1]'));
 assert(first===0&&body.some(s=>s.includes('본문 첫 줄'))&&msg>first,body.join('\n'));
+// 11-27: the popup's head of the received request leads with the received arrow, its title on the same row.
+assert(/^← \[e7\] /.test(body[first])&&body[first].includes('검토 요청: 팝업 바탕'),body.join('\n'));
 """)
 
     def test_every_height_and_width_keeps_its_rows_inside_the_panel(self):
@@ -258,10 +263,10 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
   for(let i=b.a+1;i<b.b;i++){assert(/^│ (│ .* │|├─+┤) │$/.test(rows[i]),i+'\n'+label);
    for(const h of v.hits.filter(h=>h.row===i))assert(/^popup:(ROUTE:rt-|MESSAGES$)/.test(h.action),h.action+'\n'+label);}
   const shown=new Set(v.hits.filter(h=>h.row>b.a&&h.row<b.b).map(h=>h.action).filter(a=>a.startsWith('popup:ROUTE:'))).size;
-  const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓](\d+) ─/g)||[]).reduce((n,m)=>n+Number(m.slice(1,-2)),0);
+  const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓] (\d+) more ─/g)||[]).reduce((n,m)=>n+Number(m.match(/\d+/)[0]),0);
   if(hidden)scrolled++;
   // Routes and requests shown plus those the border counts are all of them.
-  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length;
+  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ (?:[→←]|[✓✕](?: [→←])?) \[/.test(s)).length;
   assert.equal(shown+requests+hidden,6,label);
   if(v.routeArea)assert(v.routeArea.top===b.a&&v.routeArea.bottom===b.b,JSON.stringify(v.routeArea)+label);
  }
@@ -292,7 +297,7 @@ const table=[[{text:'STATE',dim:true},{text:'  ROUTE  ',foreground:-1},{text:'AG
  [{text:'✕',foreground:217,bold:true},{text:' 휠 입력 시험 '},{text:'54m',foreground:242},{text:' code ',dim:true,bold:true}],
  [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:'cc',foreground:173},{text:' 대기',foreground:150,dim:true}]];
 const question=[[{text:'◑ ',role:'accent'},{text:'route 상자를 이대로 둘까요?'}],[{text:'  '},{text:'▸',foreground:116,bold:true},{text:' 1 네',foreground:253,bold:true}],[{text:'    2 아니오',dim:true}],[{text:'↑↓ · Enter 보내기 · Esc 닫기',dim:true}]];
-const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'◂',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
+const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'←',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
  messages:[{way:'←',who:'[e1]',harness:'claude',when:'08:10',text:'CI 통과'}]},columns:60});
 const gray=f=>Number.isInteger(f)&&f>=232&&f<=255;
 for(const [name,body,kind] of [['question',question,'text'],['table',table,'table'],['messages',messages,'text']])

@@ -14,6 +14,9 @@ who answers it now, and whether it is current, older or ownerless. A steward rel
 that summary with the recommendation to its person through its own native question
 surface; it never answers on the person's behalf.
 
+``hearting run questions close ID`` withdraws one of this session's own questions: only that
+id closes, every other question and draft stays.
+
 ``hearting run questions answer ID ...`` sends the person's chosen answer through the
 same selected-request path Fleet uses (``human_wait_state.submit_selected_response``):
 S2 releases the route gate, S3 continues the blocked owner with a correction, S1 Codex
@@ -90,7 +93,8 @@ def questions_of(envelope):
     """``[{id, question, choices, recommended}]`` from one selected request envelope.
 
     A registered question (``questions ask``) takes words beside its choices, as ``[value, text]`` or text
-    alone (11-22): a native form keeps the schema's own ``is_other``."""
+    alone (11-22): a native form keeps the schema's own ``is_other``. A question whose choices say
+    something under their names also has ``descriptions`` (one per choice, ``""`` for none)."""
     registered = _registered(envelope)
     detail = envelope.get("detail") if isinstance(envelope, dict) else None
     listed = detail.get("questions") if isinstance(detail, dict) else None
@@ -101,14 +105,20 @@ def questions_of(envelope):
                 continue
             choices = question.get("choices") if isinstance(question.get("choices"), list) else []
             recommended = question.get("recommended")
-            out.append({"id": str(question["id"]), "question": str(question.get("question") or ""),
-                        "choices": choices,
-                        "recommended": recommended if type(recommended) is int
-                        and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", registered or not choices)) and not (
-                            choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
-                            and question.get("field_type") != "multiselect"),
-                        "secret": bool(question.get("is_secret"))})
+            row = {"id": str(question["id"]), "question": str(question.get("question") or ""),
+                   "choices": choices,
+                   "recommended": recommended if type(recommended) is int
+                   and 0 <= recommended < len(choices) else None,
+                   "free_text": bool(question.get("is_other", registered or not choices)) and not (
+                       choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
+                       and question.get("field_type") != "multiselect"),
+                   "secret": bool(question.get("is_secret"))}
+            # 11-27 (design 가): each choice's words under its name, for the board to draw; only where one
+            # has any, so a question without them reads exactly as before. Never part of an answer.
+            described = HWS.choice_descriptions(question)
+            if any(described):
+                row["descriptions"] = described
+            out.append(row)
         return out
     question_id = envelope.get("question_id") if isinstance(envelope, dict) else None
     if question_id is None:
@@ -227,10 +237,14 @@ def render(board, rows, folded):
             lines.append(prefix + body_lines[0])
             continuation = " " * len(prefix)
             lines.extend(continuation + line for line in body_lines[1:])
+            described = question.get("descriptions") or ()
             for number, choice in enumerate(question["choices"], 1):
                 mark = ("  (" + recommended_label + ")"
                         if question["recommended"] == number - 1 else "")
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
+                # The choice's words, under its name as the board draws them (a relay keeps them).
+                if number <= len(described) and described[number - 1]:
+                    lines.extend("         " + said for said in described[number - 1].splitlines())
         if row.get("answerable"):
             listed = row.get("questions") or ()
             if row.get("answer_kind") == "decision":
@@ -431,22 +445,63 @@ def _answer(args):
     return code
 
 
-def _ask(args):
+def _choice_description_args(choices, given):
+    """``--choice-description N=WORDS`` as ``{choice value: words}`` (N counts the choices from 1), or None.
+
+    Optional: a choice given none has none, and a question asked without any reads as it always did."""
+    out = {}
+    for raw in given:
+        number, sep, words = str(raw).partition("=")
+        if not sep or not number.strip().isascii() or not number.strip().isdigit() \
+                or not 1 <= int(number) <= len(choices):
+            raise ValueError("--choice-description takes N=WORDS, N a choice number 1..%d: %r"
+                             % (len(choices), raw))
+        value = choices[int(number) - 1]
+        if value in out:
+            raise ValueError("--choice-description: choice %d is given twice" % int(number))
+        out[value] = words
+    return out or None
+
+
+def _caller():
+    """This interactive session's ``(harness, sid, seat)``; a worker or an unproven seat is refused."""
     import session_tidy as tidy
     from dispatch_parent_completion import interactive_parent_identity
+    if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
+            in {"owner", "worker", "auxiliary", "reviewer"}):
+        raise ValueError("question-caller-is-worker")
+    harness, sid = interactive_parent_identity()
+    if harness not in {"claude", "codex", "opencode"} or not HWS._safe_native_ref(sid):
+        raise ValueError("question-caller-unknown")
+    seat = tidy.resolve_seat(harness, os.getcwd(), os.environ, sid)
+    if not seat.key:
+        raise ValueError("question-seat-unproven")
+    return harness, sid, seat
+
+
+def _close(args):
+    """Withdraw one of this session's own questions by its full id; every other stays open."""
     try:
-        if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
-                in {"owner", "worker", "auxiliary", "reviewer"}):
-            raise ValueError("question-caller-is-worker")
-        harness, sid = interactive_parent_identity()
-        if harness not in {"claude", "codex", "opencode"} or not HWS._safe_native_ref(sid):
-            raise ValueError("question-caller-unknown")
+        harness, sid, seat = _caller()
+        result = HWS.close_message(harness, sid, seat.key, args.id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print("questions: " + str(exc), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("questions: %s %s" % (result["id"], result["state"]) + (
+            " (its answer is on the way; its receipt ends it)" if result["state"] == "submitted" else ""))
+    return 0 if result["state"] == "cancelled" else 1
+
+
+def _ask(args):
+    import session_tidy as tidy
+    try:
+        harness, sid, seat = _caller()
         if (args.text is None) == (args.text_file is None):
             raise ValueError("give TEXT or --text-file, exclusively")
         text = Path(args.text_file).read_text(encoding="utf-8") if args.text_file else args.text
-        seat = tidy.resolve_seat(harness, os.getcwd(), os.environ, sid)
-        if not seat.key:
-            raise ValueError("question-seat-unproven")
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         from fleet.process_identity import current_launch_context
         launch = current_launch_context(harness, sid)
@@ -454,25 +509,24 @@ def _ask(args):
         value = HWS.register_message(harness, sid, seat, text,
             sequence=tidy.read_prompt_seq(seat), choices=args.choice or (),
             recommended=args.recommend - 1 if args.recommend is not None else None,
-            secret=args.secret, incarnation=incarnation)
+            secret=args.secret, incarnation=incarnation,
+            descriptions=_choice_description_args(args.choice or (), args.choice_description or ()))
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
-    replaced = value.get("replaced")
-    if replaced:
-        first = (replaced["question"].strip().splitlines() or [""])[0].strip()
-        replaced = {"id": replaced["id"], "first_line": first if len(first) <= 80 else first[:79] + "…"}
+    # This very registration may already have ended at this prompt (closed, or answered): say its
+    # end, never "waiting for an answer". A later prompt opens a new id.
+    ended = value["lifecycle"] != "open"
     if args.json:
-        print(json.dumps({"id": value["id"], "state": value["lifecycle"],
-                          **({"replaced": replaced} if replaced else {})}, ensure_ascii=False))
+        print(json.dumps({"id": value["id"], "state": value["lifecycle"]}, ensure_ascii=False))
+    elif ended:
+        print("questions: %s %s (the same question already ended at this prompt; ask at a later "
+              "prompt for a new one)" % (value["id"], value["lifecycle"]))
     else:
         print(value["id"])
-        if replaced:
-            # One session keeps one open question: say which earlier unanswered one this closed.
-            print("questions: replaced %s — %s" % (replaced["id"], replaced["first_line"]))
         print(HWS.ui_translator()("questions.registered_choices" if args.choice
                                   else "questions.registered"))
-    return 0
+    return 1 if ended else 0
 
 
 def main(argv=None):
@@ -485,11 +539,17 @@ def main(argv=None):
     ask.add_argument("--text-file")
     ask.add_argument("--choice", action="append",
                      help="one choice the person can pick (repeat); list what is to be chosen here, not in the text")
+    ask.add_argument("--choice-description", action="append", metavar="N=WORDS",
+                     help="words shown under choice N (1-based; repeat; optional)")
     ask.add_argument("--recommend", type=int)
     ask.add_argument("--secret", action="store_true")
     ask.add_argument("--json", action="store_true")
     answer = sub.add_parser("answer", allow_abbrev=False,
                             help="send the person's chosen answer the existing way")
+    close = sub.add_parser("close", allow_abbrev=False,
+                           help="withdraw one of this session's own questions (only that id)")
+    close.add_argument("id", help="the full question id")
+    close.add_argument("--json", action="store_true")
     for target, default in ((parser, False), (listing, argparse.SUPPRESS)):
         target.add_argument("--json", action="store_true", default=default)
         target.add_argument("--all", action="store_true", default=default,
@@ -509,6 +569,8 @@ def main(argv=None):
         return _ask(args)
     if args.command == "answer":
         return _answer(args)
+    if args.command == "close":
+        return _close(args)
     return _list(args)
 
 
