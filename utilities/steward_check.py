@@ -869,10 +869,11 @@ def _quiet_signature(observation: dict) -> str:
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
     records alone do not repeat; a live unfinished target is checked every interval.
-    Unresolved targets remain visible, but only repeat when positively live. A target
-    whose only outstanding row is a queued peer request is the runtime's delivery, not a
-    reason to wake the steward."""
-    return not any(t["state"] != "done" and t["liveness"] != "ended" and not _queued_for(t)
+    Unresolved targets remain visible, but only repeat when positively live. Only an
+    idle target whose outstanding row is a queued peer request is the runtime's
+    delivery; a working target with one is still checked every interval."""
+    return not any(t["state"] != "done" and t["liveness"] != "ended"
+                   and not (_queued_for(t) and t["state"] == "idle")
                    for t in observation["targets"]
                    if not t.get("unresolved") or t["liveness"] == "live")
 

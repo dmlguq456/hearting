@@ -780,6 +780,16 @@ class StewardCheckRemainingWorkTest(CheckBase):
         self.step(T0 + 2 * INTERVAL)
         self.assertEqual(self.notify.call_count, 1)  # unchanged: quiet
 
+    def test_a_working_target_with_a_queued_request_is_checked_again(self):
+        owed = dict(target("e7", state="working"), owed=1)
+        self.seen = {"targets": [owed], "pending_messages": 0}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        self.step(T0 + 2 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 2)  # a working target keeps the interval
+
     def test_a_queued_peer_request_is_not_named_as_the_stewards_work(self):
         owed = dict(target("e7", state="idle"), owed=1)
         self.seen = {"targets": [owed], "pending_messages": 0, "open_work": ["next slice"]}
