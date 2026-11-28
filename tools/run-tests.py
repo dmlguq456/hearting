@@ -821,8 +821,11 @@ def extract_unittest_counts(stdout: str, stderr: str) -> tuple[int, int, str | N
     ``(0, 0, None)`` when absent. Skip events are what ``OK (skipped=K)`` counts: one per skipped
     test, per skipped ``subTest`` and per ``setUpClass``/``setUpModule`` skip, so it is not a count
     of tests. The progress line is ``None`` when the run was verbose or not unittest's.
+
+    unittest writes its summary to stderr, so stdout is read only when stderr carries none: a test
+    that prints another run's summary (a child's output) to stdout no longer stands for the file's.
     """
-    text = "\n".join((stderr or "", stdout or ""))
+    text = stderr if _UNITTEST_RAN_RE.search(stderr or "") else "\n".join((stderr or "", stdout or ""))
     ran = _UNITTEST_RAN_RE.findall(text)
     skipped = _UNITTEST_SKIPPED_RE.findall(text)
     progress = _UNITTEST_PROGRESS_RE.findall(text)
@@ -838,8 +841,9 @@ def whole_file_skipped(result: "SuiteResult") -> bool:
     so the file is a PASS. When unittest's progress line is there, any result other than ``s`` in it
     (a pass, an expected failure) also means work ran, which separates a skipped class from a passed
     test in another class even when the two counts happen to be equal. Limit: with no progress line
-    (verbose output) that coincidence reads as a skip, and a ``subTest`` that passes inside a test
-    that never fails leaves no mark in the line, so the counts alone decide.
+    (verbose output), or one cut by a line a test printed to stderr, that coincidence reads as a skip,
+    and a ``subTest`` that passes inside a test that never fails leaves no mark in the line, so the
+    counts alone decide.
     """
     if not result.tests_skipped:
         return False

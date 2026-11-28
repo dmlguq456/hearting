@@ -60,17 +60,16 @@ assert.deepEqual(only(R),[
  '  rate limiting',
  '  ● owner  claude Opus 5.5 xhigh',
  '  ┌ 3/6: execute ──────────────────┐',
- '  │ ⠋ worker claude Sonnet 5.5     │',
- '  │   CTX 22% · 12m                │',
+ '  │ ⠋ worker Sonnet 5.5    12m 22% │',
  '  │   ⠋ code-review Opus 5.5    3m │',
  '  │   ⠋ fact-verify Sonnet 5.5  1m │',
  '  │     ⠋ web-lookup GPT-5.5    1m │',
  '  └────────────────────────────────┘',
 ]);
 const rows=only(R);
-assert.equal(col(rows[4],'⠋'),4);assert.equal(col(rows[6],'⠋'),6);assert.equal(col(rows[8],'⠋'),8);
+assert.equal(col(rows[4],'⠋'),4);assert.equal(col(rows[5],'⠋'),6);assert.equal(col(rows[7],'⠋'),8);
 // (the time ends at the box's right edge on every row, in one column)
-assert.equal(new Set([6,7,8].map(i=>cells(rows[i].replace(/ │$/,'')))).size,1);
+assert.equal(new Set([5,6,7].map(i=>cells(rows[i].replace(/ │$/,'')))).size,1);
 // The unit's name is the role word's dim; no other new color or word.
 const row=render([R],44,60).rows.find(r=>/code-review/.test(text(r)));
 assert.equal(row.find(p=>p.text==='code-review').dim,true);
@@ -80,7 +79,7 @@ assert.equal(row.find(p=>p.text==='code-review').dim,true);
         self.node(r"""
 const rows=only(R,44,{configuration:{worker_box:'none'}});
 const at=rows.findIndex(s=>/↳ ⠋ worker/.test(s));
-assert.deepEqual(rows.slice(at,at+5),['    ↳ ⠋ worker claude Sonnet 5.5','        CTX 22% · 12m','        ⠋ code-review Opus 5.5    3m',
+assert.deepEqual(rows.slice(at,at+4),['    ↳ ⠋ worker Sonnet 5.5    12m 22%','        ⠋ code-review Opus 5.5    3m',
  '        ⠋ fact-verify Sonnet 5.5  1m','          ⠋ web-lookup GPT-5.5    1m']);
 """)
 
@@ -99,10 +98,11 @@ assert.equal(col(rows[3],'⠋'),col(rows[2],'⠋')+2,rows.join('\n'));
 assert(/fact-verify/.test(rows[3]));
 """)
 
-    def test_a_context_row_of_the_caller_stands_above_the_unit(self):
+    def test_a_called_unit_follows_its_callers_now(self):
         self.node(r"""
-const rows=only(R),at=rows.findIndex(s=>/CTX 22%/.test(s));
-assert(/code-review/.test(rows[at+1]),rows.join('\n'));
+const caller=R.workers_live[0],rows=only({...R,workers_live:[{...caller,paint:{...caller.paint,now:'Check labels'}}]});
+const at=rows.findIndex(s=>/worker.*22%/.test(s));
+assert(at>=0&&/Check labels +12m/.test(rows[at+1])&&/code-review.*3m/.test(rows[at+2]),rows.join('\n'));
 """)
 
     def test_short_of_cells_the_effort_goes_first_then_the_harness_then_the_model_and_the_name_and_the_time_stay(self):
@@ -133,7 +133,7 @@ let dropped=0,shown=0;
 for(let h=14;h<=44;h++){
  const a=draw([R],44,h),b=draw([NONE],44,h),n=a.filter(s=>/code-review|fact-verify|web-lookup/.test(s)).length;
  if(n===0){dropped++;assert.deepEqual(a,b,'h='+h);}
- else{shown++;assert.equal(n,3,'h='+h);assert(a.some(s=>/CTX 22%/.test(s))&&a.some(s=>/└─/.test(s)),'h='+h);}
+ else{shown++;assert.equal(n,3,'h='+h);assert(a.some(s=>/worker .*22%/.test(s))&&a.some(s=>/└─/.test(s)),'h='+h);}
 }
 assert(dropped>0&&shown>0,dropped+' '+shown);
 // the one-row-per-route fold draws none
