@@ -128,13 +128,22 @@ term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
   env:{...process.env,TERM:cfg.term||'xterm-256color',...(cfg.no_color?{NO_COLOR:'1'}:{}),...(cfg.colorterm?{COLORTERM:cfg.colorterm}:{}),...(cfg.colorfgbg?{COLORFGBG:cfg.colorfgbg}:{}),NODE_OPTIONS:'--require '+cfg.launcher}});
-child.onData(d=>{term.write(d);raw+=d;});
+// The host draws each frame inside synchronized output (`ESC[?2026h` … `ESC[?2026l`, host.cjs), and a terminal shows
+// such a frame only once it is whole. Under the veil a frame writes each changed row across the whole width (the popup's
+// cells too) and lays the popup over them last; a frame's bytes can come in two PTY reads on a loaded machine, and a read
+// between them saw rows with no popup on them (a frame color counted twice, `still` 2) or the popup's lower rows without
+// its top line, so none of it was taken for the popup (`bright` 129/130: CI 11-26 Release, 11-28 #1931 and #1941).
+let framing=false,arrived=0,tail='';
+child.onData(d=>{arrived++;term.write(d);raw+=d;const t=tail+d,open=t.lastIndexOf('\x1b[?2026h'),shut=t.lastIndexOf('\x1b[?2026l');
+  if(open>=0||shut>=0)framing=open>shut;tail=t.slice(-7);});
 const flush=()=>new Promise(r=>term.write('',r));
+// Every byte that arrived is parsed and no frame is open (one that never closes is read as it stands after 2 s).
+const whole=async()=>{for(let i=0;i<400;i++){const n=arrived;await flush();if(!framing&&n===arrived)return;await sleep(5);}};
 // Each row as one character per cell (a wide character's second cell is empty).
 const cells=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
-const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cells(y).join('').trimEnd());};
+const screen=async()=>{await whole();return Array.from({length:rows},(_,y)=>cells(y).join('').trimEnd());};
 // The cell where `needle` starts (a wide character's two cells hold one character of text).
-const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cells(y),where=[];let text='';
+const at=async needle=>{await whole();for(let y=0;y<rows;y++){const c=cells(y),where=[];let text='';
   c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const i=text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=12000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return s;await sleep(30);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
@@ -145,7 +154,7 @@ const frames={},checks={};
 // The popup's rectangle on screen: its `╭` row and column to its `╯`.
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─ ')&&l.includes('✕ ─╮'));if(top<0)return null;
   const bottom=s.findIndex((l,i)=>i>top&&l.includes('╰─')&&l.includes('╯'));return {top,bottom};};
-const region=async()=>{await flush();const out=[];for(let y=0;y<rows;y++){const c=cells(y),i=c.indexOf('╭'),j=c.indexOf('╮');if(i>=0&&j>i&&c.slice(i,j+1).join('').includes('✕')){
+const region=async()=>{await whole();const out=[];for(let y=0;y<rows;y++){const c=cells(y),i=c.indexOf('╭'),j=c.indexOf('╮');if(i>=0&&j>i&&c.slice(i,j+1).join('').includes('✕')){
   let b=y;while(b<rows&&!cells(b).includes('╯'))b++;for(let k=y;k<=b;k++)out.push(cells(k).slice(i-1,j+2).join(''));return out;}}return null;};
 const resize=async(c,r)=>{cols=c;rows=r;term.resize(c,r);child.resize(c,r);await sleep(400);};
 // One synchronized frame draws the popup: the paint that brings its top line begins with ?2026h
@@ -179,7 +188,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     await key('paint\r',300);await key('busy\r',600);
     let s=await until(has('RED_TEXT'),'the colored row');
     checks.red_before=await lookAt('RED_TEXT');checks.blue_before=await lookAt('BLUE_BG');
-    const moving=new Set();for(let i=0;i<14;i++){moving.add(frameLooks());await sleep(150);}checks.moving_before=moving.size;
+    const moving=new Set();for(let i=0;i<14;i++){await whole();moving.add(frameLooks());await sleep(150);}checks.moving_before=moving.size;
     // Output of every kind while it stands: sampled every 40 ms for 1.6 s.
     await key('show\r',100);await key('\x1d',150);s=await until(s=>!!box(s),'the popup');
     checks.bright_open=(await bright()).length;checks.bright_sample=JSON.stringify((await bright()).slice(0,3));
@@ -196,7 +205,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     await key('\x1b',300);s=await until(s=>!box(s),'closed');frames.closed=s;
     const after=looks();checks.gray_left=after.flat().filter(c=>c&&c.fg===VEIL).length;
     checks.poke_after=await lookAt('POKE');
-    const turning=new Set();for(let i=0;i<14;i++){turning.add(frameLooks());await sleep(150);}checks.moving_after=turning.size;
+    const turning=new Set();for(let i=0;i<14;i++){await whole();turning.add(frameLooks());await sleep(150);}checks.moving_after=turning.size;
     // While it stands the window changes: narrower, folded by itself, open again; the panel under the
     // native (opened by hand where it cannot stand beside) and back beside it.
     await key('\x1d',250);await until(s=>!!box(s),'the popup again');
@@ -221,7 +230,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     // 11-17: the popup's ground as the terminal shows it, in 24-bit color (the cell's RGB) or in a palette step: the popup's
     // own cells, the cell each side of it, and the chosen choice's rows; nothing of them outside the popup.
     await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
-    await key('\x1d',500);await until(s=>!!box(s),'the popup');await flush();
+    await key('\x1d',500);await until(s=>!!box(s),'the popup');await whole();
     const s=await screen(),b=box(s),c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),rowsOut=[];
     const bg=(line,x)=>{const cell=line?.getCell(x);return !cell?null:cell.isBgRGB()?'#'+cell.getBgColor().toString(16).padStart(6,'0'):cell.isBgPalette()?cell.getBgColor():-1;};
     for(let y=b.top;y<=b.bottom;y++){const line=term.buffer.active.getLine(y);
@@ -265,7 +274,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   // 52, the dark face's: the fixture's face is unknown) across the popup's inside, the cell between it and
   // each side line on the popup's ground (235); ↓ moves it to the next choice; the cell each side of the
   // frame stands on the popup's ground too.
-  const tint=async()=>{await flush();const b=box(await screen());if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),out=[];
+  const tint=async()=>{const b=box(await screen());if(!b)return null;const c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),out=[];
     for(let y=b.top+1;y<b.bottom;y++){const line=term.buffer.active.getLine(y),bg=x=>{const cell=line?.getCell(x);return cell&&cell.isBgPalette()?cell.getBgColor():-1;};
       const inside=[];for(let x=left+2;x<=right-2;x++){const cell=line?.getCell(x);if(cell&&cell.getWidth()===0)continue;inside.push(bg(x));}
       out.push({text:cells(y).slice(left,right+1).join(''),inside,beside:[bg(left+1),bg(right-1)],margin:[bg(left-1),bg(right+1)]});}
@@ -286,7 +295,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!box(s)&&has('✓')(s),'the answer sent and the popup closed');
   frames.answered=s;
   // Closed, no popup ground or chosen ground is left anywhere.
-  await flush();{let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const c=line?.getCell(x);
+  await whole();{let n=0;for(let y=0;y<rows;y++){const line=term.buffer.active.getLine(y);for(let x=0;x<cols;x++){const c=line?.getCell(x);
     if(c&&c.isBgPalette()&&[52,235].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');

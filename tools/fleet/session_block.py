@@ -1,7 +1,7 @@
 """Question-first session block; values and authority keep their existing owners."""
 import re
 
-from .session_line import route_text, status_lines, clip_segments, wrap_segments as wrap_parts
+from .session_line import route_text, status_lines, clip_segments, wrap_segments as wrap_parts, wrap_words
 from .explorer.grid import cell_width
 from .config import ui_text
 
@@ -161,23 +161,23 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
             # Two cells stay free before the number for the editor's mark column (spec E9 rule 53).
             room = max(1, width - cell_width(prefix) - 2)
-            for line_index, line in enumerate(wrap_parts(parts, room)):
+            for line_index, line in enumerate(wrap_words(parts, room)):
                 options.append([(prefix, "g_blocked") if line_index == 0 else (" " * cell_width(prefix), "dim"), *line])
             # 11-27 (design 가): the choice's words on the rows under its name, from its name's first cell,
             # dim (`CHOICE_DETAIL`); they belong to the choice as its name's own rows do.
             words = str(described[choice_number - 1] or "") if choice_number <= len(described) else ""
             for said in filter(str.strip, map(_drawable, words.splitlines())):
-                for line in wrap_parts([(said, CHOICE_DETAIL)], room):
+                for line in wrap_words([(said, CHOICE_DETAIL)], room):
                     options.append([(" " * cell_width(prefix), "dim"), *line])
         body = []
         # 11-15: a markdown table in the question's text reads as aligned columns (the documents' one
-        # table rule, ``transcript.table_parts``); every other line wraps as before.
+        # table rule, ``transcript.table_parts``); every other line wraps at its spaces (``wrap_words``).
         from .explorer.transcript import table_parts
         for source_line in table_parts(str(question.get("question") or "?").splitlines(), width):
             if isinstance(source_line, list):
                 body.extend(source_line)
             elif source_line.strip():
-                body.extend(wrap_parts([(source_line, "loc_repo")], width))
+                body.extend(wrap_words([(source_line, "loc_repo")], width))
         question["display"] = {
             "head": heading, "source": source,
             "body": body,

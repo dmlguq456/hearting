@@ -728,9 +728,18 @@ class SessionShellSuccessionTest(unittest.TestCase):
         second = self.switched(window, first['host_pid'])
         self.assertNotEqual(second['host_pid'], first['host_pid'])
         self.assertEqual(second['native_pid'], first['native_pid'])
-        # The new host's own paint, not the old one's: the box is on the screen it restored.
-        window.pump(1.5)
-        lines = window.screen()['lines']
+        # The new host's own paint, not the old one's: the box is on the screen it restored. `switched` reads one live
+        # host, so every byte after `mark` is the new host's, whose first frame writes every row again; it draws the box
+        # from its next projection, which a loaded runner brought later than a fixed 1.5 s (CI 11-28, 8 of 76 runs: the
+        # new panel stood without the box). So: a frame of the new host has ended, and the screen shows the box.
+        mark = len(window.raw)
+        end = time.monotonic()+30
+        while True:
+            window.pump(.2)
+            lines = window.screen()['lines']
+            boxed = any('QUESTIONS' in row for row in lines) and any('Pending demo question' in row for row in lines)
+            if boxed and b'\x1b[?2026l' in window.raw[mark:] or time.monotonic() >= end:
+                break
         self.assertTrue(any('QUESTIONS' in row for row in lines), lines)
         self.assertTrue(any('Pending demo' in row for row in lines), lines)
         read_before = (window.root/'native-read').read_bytes()

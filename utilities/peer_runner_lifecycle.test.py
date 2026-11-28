@@ -1200,8 +1200,13 @@ console.log(JSON.stringify(calls[0]));
                 registry_reads.append(path)
             return original_read_text(path, *args, **kwargs)
 
+        host_processes = []
+
         def count_reconcile(*args, **kwargs):
             passes.append(1)
+            # The census cost follows the host's process table (see `_CENSUS_PROCESS_LIMIT`), which other suites
+            # running beside this one change during the window: record it with the measurement.
+            host_processes.append(sum(1 for entry in os.listdir("/proc") if entry.isdigit()))
             return original_reconcile(*args, **kwargs)
 
         class StopRunnerWindow(Exception):
@@ -1290,10 +1295,12 @@ console.log(JSON.stringify(calls[0]));
             f"runner_idle_window=20s one_core=100% child_cpu=excluded "
             f"cpu={cpu_percent:.3f}% passes={len(passes)} "
             f"watch_scans={len(watch_scans)} batch_scans={len(batch_scans)} "
-            f"jobs_registry_reads={len(registry_reads)} live_legacy=16"
+            f"jobs_registry_reads={len(registry_reads)} live_legacy=16 "
+            f"host_processes={min(host_processes)}-{max(host_processes)}"
         )
         self.assertLess(cpu_percent, 15.0,
-                        f"steady runner consumed {cpu_percent:.2f}% of one core")
+                        f"steady runner consumed {cpu_percent:.2f}% of one core with "
+                        f"{min(host_processes)}-{max(host_processes)} host processes")
         self.assertEqual(old_exit_codes, [-signal.SIGTERM] * 16)
 
     def _fixture_fd(self, pid):
