@@ -132,6 +132,34 @@ class DegradationWriterTest(unittest.TestCase):
                 writer="stage-dispatch-fallback.py", reason=reason, detail=kept[0])
             self.assertEqual(json.loads(Path(path).read_text())["detail"], kept[0])
 
+    def test_frame_alternative_detail_keeps_only_closed_values_for_its_reason(self):
+        reason = "frame-other-harness-unusable"
+        valid = "band:primary,codex:gated,opencode:not-in-band"
+        cases = (
+            (reason, valid, valid),
+            (reason, "band:relief,claude:ineligible", "band:relief,claude:ineligible"),
+            (reason, "band:primary,codex:legacy-no-tiebreak", "band:primary,codex:legacy-no-tiebreak"),
+            (reason, "FRAME_FIXTURE_SENTINEL prompt=private", "[detail omitted]"),
+            (reason, "band:FRAME_FIXTURE_SENTINEL,codex:gated", "[detail omitted]"),
+            (reason, "band:primary,FRAME_FIXTURE_SENTINEL:gated", "[detail omitted]"),
+            (reason, "band:primary,codex:FRAME_FIXTURE_SENTINEL", "[detail omitted]"),
+            (reason, "band:primary,codex:gated\nreason=FRAME_FIXTURE_SENTINEL", "[detail omitted]"),
+            (reason, "band:primary,codex:gated,codex:ineligible", "[detail omitted]"),
+            (reason, "band:primary", "[detail omitted]"),
+            ("frame-single-available-harness", valid, "[detail omitted]"),
+        )
+        with tempfile.TemporaryDirectory() as home:
+            for index, (row_reason, value, expected) in enumerate(cases):
+                with self.subTest(reason=row_reason, detail=value):
+                    path = record_degradation(
+                        agent_home=home, jobs=Path(home) / "jobs.log",
+                        route_id=f"rt-frame-detail-fixture-{index}", route_node="frame-alternative",
+                        route_hash="sha256:fixture", dispatch_depth=1, writer="dispatch_contract.py",
+                        reason=row_reason, detail=value)
+                    raw = Path(path).read_text()
+                    self.assertNotIn("FRAME_FIXTURE_SENTINEL", raw)
+                    self.assertEqual(json.loads(raw)["detail"], expected)
+
     def test_direct_writer_normalizes_invalid_and_oversized_candidate_input(self):
         from dispatch_contract import CANDIDATE_PAYLOAD_BYTES
         with tempfile.TemporaryDirectory() as home:
