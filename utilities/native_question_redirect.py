@@ -15,7 +15,8 @@ each hook carries it as it is:
   (a Hearting question, a route gate, a native wait), a retry or a late screen is never a reason
   to let the native question open.
 - pass: registration failed before anything was written (a shape a record cannot carry, no proven
-  seat, a refused or failed write, the budget ran out) and the session's questions were read
+  seat, a refused or failed write, this very registration already ended at this prompt, the budget
+  ran out) and the session's questions were read
   without a same one. The call's private identity reference goes onto the session's native wait
   marker (`fleet.interaction`, no text) and the native question opens, counted as that wait; the
   same call again is told it is open there. The marker's own clear ends the reference.
@@ -229,6 +230,8 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
                 choices=built["choices"],
                 recommended=built["recommend"] - 1 if built["recommend"] else None,
                 descriptions=built["descriptions"], secret=built["secret"], cwd=cwd, incarnation=incarnation)
+            if value.get("lifecycle") != "open":     # this very registration already ended at this prompt
+                raise Unfit("question-already-ended")
             return value["id"]
         except ValueError as exc:
             if str(exc) != "question-detail-too-large" or built is builds[-1]:

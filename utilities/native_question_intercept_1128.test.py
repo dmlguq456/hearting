@@ -251,6 +251,21 @@ class PassTest(Base):
                         self.the_id(redirect.decide(harness, payload))
                     self.done(harness)
 
+    def test_a_question_closed_and_asked_again_at_the_same_prompt_opens_natively(self):
+        """#1927 returns this very registration's ended record at the same prompt; it is not read as
+        registered (no answer would come), so the native question opens, marked; the next prompt
+        registers it anew."""
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                first = self.the_id(redirect.decide(harness, payloads()[harness]))
+                state.close_message(harness, SID, self.f.seat(harness, SID).key, first)
+                self.assertEqual(redirect.decide(harness, payloads()[harness]), redirect.Outcome("pass"))
+                self.assertTrue(interaction.read_wait(SID, harness)["call_ref"])
+                interaction.clear_wait(SID, harness, reason="answered")
+                self.next_prompt(harness)
+                self.assertNotEqual(self.the_id(redirect.decide(harness, payloads()[harness])), first)
+                self.done(harness)
+
     def test_a_passed_codex_question_is_on_the_shared_wait_list_until_its_tool_ends(self):
         """Backlog 11-14 (RV-PR1633 follow-up 7): before this, nothing marked a Codex question the
         redirect let through, so only a readable live rollout could show it."""
