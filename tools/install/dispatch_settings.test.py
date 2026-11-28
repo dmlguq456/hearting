@@ -87,6 +87,40 @@ class DispatchSettingsTest(unittest.TestCase):
         settings.set_allocation({"depth_affinity.owner": None, "depth_affinity.worker": None})
         self.assertNotIn("depth_affinity:", self.path.read_text())
 
+    def test_an_empty_flow_mapping_opens_as_a_block_for_a_nested_key(self):
+        # A hand-cleared `depth_affinity: {}` reads as an empty mapping, so the
+        # editor opens it as a block instead of refusing it as a scalar.
+        cleared = USER.replace("  depth_affinity:\n    worker: codex\n", "  depth_affinity: {}   # cleared\n")
+        self.write(cleared)
+        self.assertEqual(settings.set_allocation({"depth_affinity.owner": None})["status"], "unchanged")
+        self.assertEqual(self.path.read_text(), cleared)
+        settings.set_allocation({"depth_affinity.worker": "claude"})
+        self.assertIn("  depth_affinity: # cleared\n    worker: claude\n  depth_affinity_weight: 0.85\n",
+                      self.path.read_text())
+        self.write(USER.replace("  depth_affinity:\n    worker: codex\n", "  depth_affinity: {owner: claude}\n"))
+        with self.assertRaises(settings.DispatchSettingsError):
+            settings.set_allocation({"depth_affinity.worker": "claude"})
+
+    def test_a_tab_inside_empty_braces_is_the_same_empty_mapping_as_for_the_parser(self):
+        cleared = USER.replace("  depth_affinity:\n    worker: codex\n", "  depth_affinity: { \t}\n")
+        self.assertEqual(settings._defaults_module().parse_yaml_subset(cleared)["allocation"]["depth_affinity"], {})
+        self.write(cleared)
+        settings.set_allocation({"depth_affinity.owner": "claude"})
+        self.assertIn("  depth_affinity:\n    owner: claude\n", self.path.read_text())
+
+    def test_a_block_missing_a_required_key_gets_the_existing_diagnostic(self):
+        # `allocation: {}` is an empty mapping now; computing the old values
+        # must not raise KeyError('strategy') before the editor's own check.
+        empty = USER[:USER.index("allocation:\n")] + "allocation: {}\ncapabilities:\n"
+        self.write(empty)
+        with self.assertRaisesRegex(settings.DispatchSettingsError, "allocation must be a block mapping to be edited"):
+            settings.set_allocation({"window": 40})
+        self.assertEqual(self.path.read_text(), empty)
+        # A scalar cell holding `{}` is named by the validator, not a TypeError.
+        self.write(USER.replace("  strategy: balanced\n", "  strategy: {}\n"))
+        with self.assertRaisesRegex(settings.DispatchSettingsUsageError, "allocation.strategy must be one of"):
+            settings.set_allocation({"window": 40})
+
     def test_invalid_values_and_unknown_keys_leave_the_file_unchanged(self):
         self.write()
         for updates in ({"usage_gate_used_percent": 101}, {"harness_weights.codex": 0.0},

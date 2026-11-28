@@ -89,12 +89,13 @@ def _finish_command(receipt):
             + " --evidence <FILE|URL> --summary-file <FILE>")
 
 
-def next_line(receipt):
+def next_line(receipt, parented=None):
     """One plain line naming what the caller does next, or "" for no receipt.
 
     A command prints it after its JSON so neither a person nor an agent has to parse
     the JSON to act. It restates the receipt's own directive (`parent_next`,
     `required_action`, `next_step` and the commands they name) and never adds one.
+    ``parented`` (open routes this session parents, `print_next_line`) only adds that count.
     """
     if not isinstance(receipt, dict) or not receipt:
         return ""
@@ -108,7 +109,9 @@ def next_line(receipt):
         if resume_at:
             return (f"next: end this turn; nothing to run - the runtime starts this route again at "
                     f"{resume_at} and leaves one notice")
-        return "next: end this turn; the runtime brings the result back to this session"
+        held = (f" · this session now parents {parented} open route{'' if parented == 1 else 's'}"
+                if isinstance(parented, int) and parented > 0 else "")
+        return "next: end this turn; the runtime brings the result back to this session" + held
     if state == "inline" or action == "execute-inline":
         if receipt.get("cwd"):
             return (f"next: work in {shlex.quote(str(receipt['cwd']))} in this session, then run: "
@@ -146,11 +149,34 @@ def next_line(receipt):
     return f"next: state {state}" if state else ""
 
 
-def print_next_line(receipt, stream=None):
-    """Write `next_line` last on stderr: stdout keeps exactly the JSON its readers parse."""
-    line = next_line(receipt)
+def _parented(receipt, jobs):
+    """Open routes the launching session parents, or None.
+
+    Counted only from the registry generation this launch already read while it is still
+    current, with the parent its own row names: nothing is read again and no identity is
+    looked up for it, so anything else leaves the line as it was."""
+    if (jobs is None or not isinstance(receipt, dict) or receipt.get("parent_next") != "end-turn"
+            or (receipt.get("auto_resume") or {}).get("resume_at")):
+        return None
+    try:
+        from dispatch_registry_cache import held_registry_view
+        from dispatch_supervision import open_route_count
+        attempt = next((launch.get("attempt_id") for launch in receipt.get("launches") or ()
+                        if isinstance(launch, dict) and launch.get("attempt_id")), None)
+        view = held_registry_view(jobs) if attempt else None
+        own = view.handover_attempt(attempt) if view is not None else None
+        return open_route_count(view, own[1].get("parent_sid")) if own else None
+    except Exception:  # noqa: BLE001 - the count is a hint, the receipt is the result
+        return None
+
+
+def print_next_line(receipt, stream=None, jobs=None):
+    """Write `next_line` last on stderr: stdout keeps exactly the JSON its readers parse.
+
+    The JSON is flushed first, whatever the optional count does."""
+    sys.stdout.flush()
+    line = next_line(receipt, _parented(receipt, jobs))
     if line:
-        sys.stdout.flush()
         print(line, file=stream or sys.stderr, flush=True)
 
 
