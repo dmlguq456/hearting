@@ -6831,8 +6831,10 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                             peer_obligations.acknowledge_session_notice_delivery(message, roots=[root])
                         continue
                     # An answer that ended without arriving, here or by an older release's
-                    # courier, is the person's to give again before its duty retires.
-                    session_notice.release_undelivered_answer(record)
+                    # courier, is the person's to give again before its duty retires. While its
+                    # answer record cannot be read or written, the duty waits for the next pass.
+                    if session_notice.release_undelivered_answer(record) is None:
+                        continue
                     store.update(duty["id"], state="complete", delivery=record["state"], cleanup="complete",
                                  expected_phases={(duty.get("observation") or {}).get("phase", "waiting")})
                     continue

@@ -81,7 +81,7 @@ class MessageQuestionFixture:
                                        "request_id": signal["id"], "question_id": "message-response",
                                        "turn_id": None}) or {}
         action = entry.get("action_id")
-        if found and action and found["receipt"]["answer_binding"]["action_id"] != action:
+        if action and (found is None or found["receipt"]["answer_binding"]["action_id"] != action):
             return pending.read(self.root, signal["session_id"], "delivery-" + sha(key + "\0" + action)) or found
         return found
 

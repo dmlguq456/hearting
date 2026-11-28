@@ -1,13 +1,17 @@
 """11-28 ("답변을 받는것도 보니까 사실상 하나씩만 잘 동작하는 구조인것 같더만"): an answer the person sent is
 "sent" only while its delivery can still arrive.
 
-An answer whose delivery ended `rejected` or `expired` after it was sent (review 1633 follow-up 2), or that an
+An answer whose delivery a courier refused (`rejected`) after it was sent (review 1633 follow-up 2), or that an
 older release's courier ended right after an install because it could not read the answer's new shape (review
 1799, advisory 1), stayed `submitted`: the panel kept `✓ answer sent`, no count held it, and the question could
 not be answered again. Now the courier pass that retires the ended delivery's duty releases that exact action
 (`session_notice.release_undelivered_answer`): the question stands and counts again, and the next answer goes as a
-new delivery, once, while the ended record stays as its receipt. An answer that arrived, or that may have arrived,
-is never released. A correction sent to a blocked worker (S3, follow-up 6) is no sent line in its parent's panel.
+new delivery, once, while the ended record stays as its receipt (past its retention, as its prune mark). Only
+`rejected` proves nothing was handed over: an operator's `expired` may follow a queue that already took the answer,
+so it stays "sent" as before (review 1926, round 1, #4). An answer that arrived, or that may have arrived, is never
+released; an answer record that cannot be read keeps the duty for the next pass (#1). The managed Codex watcher
+leaves answers to the peer courier (#6). A correction sent to a blocked worker (S3, follow-up 6) is no sent line
+in its parent's panel.
 
 The questions are registered, answered, carried and taken through the real code in a private state root
 (fixtures/message_questions.py); only native census, RPC and I/O are fixtures. No window, process or model is used.
@@ -18,6 +22,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib
 import io
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +30,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
 import dispatch_pending_delivery as pending  # noqa: E402
+import human_gate_observation as observation  # noqa: E402
 import human_wait_state as waits  # noqa: E402
 import peer_obligations as obligations  # noqa: E402
 import questions  # noqa: E402
@@ -38,9 +44,12 @@ CHOICES = ["original-value", "other"]
 class AnswerUndeliveredTest(unittest.TestCase):
     @contextlib.contextmanager
     def fresh(self, **subtest):
-        """One case: its own private state root, so no case's duties ride another's courier pass."""
+        """One case: its own private state root, so no case's duties ride another's courier pass. The host's
+        Codex rollouts are not this case's: a complete, empty observation keeps every count exact."""
         from fixtures.message_questions import MessageQuestionFixture
-        with self.subTest(**subtest), MessageQuestionFixture() as self.f:
+        with self.subTest(**subtest), MessageQuestionFixture() as self.f, mock.patch.object(
+                observation, "_codex_rollout_waits", return_value={"complete": True, "pending": {}}):
+            self.sends = []
             yield
 
     # -- the real path, step by step ------------------------------------------------------------
@@ -62,6 +71,7 @@ class AnswerUndeliveredTest(unittest.TestCase):
             calls, _ref, row = self.f.courier(signal)
         except StopIteration:
             return None
+        self.sends.extend(calls)
         if not calls:
             return ""
         return (row or {}).get("text") or calls[-1]
@@ -121,10 +131,12 @@ class AnswerUndeliveredTest(unittest.TestCase):
         self.assertEqual(kept["state"], ended["state"], "the ended delivery stays as its receipt")
         return seen
 
-    def assert_arrives_once(self, signal, values, action):
+    def assert_arrives_once(self, signal, values, action, between=None):
         again = self.answer(signal, values, action)
         self.assertEqual((again["state"], again["action_id"]), ("submitted", action), again.get("result"))
         self.assertEqual(self.seen(signal)["panel"], "sent")
+        if between:
+            between()
         record = self.f.record(signal)
         self.assertEqual((record["state"], record["receipt"]["answer_binding"]["action_id"]), ("pending", action))
         wire = self.carry(signal)
@@ -141,22 +153,168 @@ class AnswerUndeliveredTest(unittest.TestCase):
 
     # -- A: a delivery that ends later ----------------------------------------------------------
 
-    def test_a_delivery_that_ends_later_brings_the_question_back_and_the_next_answer_arrives_once(self):
+    def test_a_refused_delivery_brings_the_question_back_and_the_next_answer_arrives_once(self):
         for harness in HARNESSES:
-            for ending in ("rejected", "expired"):
-                for second in (["original-value"], ["other"]):   # the same answer, a different one
-                    with self.fresh(harness=harness, ending=ending, second=second[0]):
-                        signal, _ = self.ask(harness, "a-%s-%s-%s" % (harness, ending, second[0]))
-                        self.assertEqual(self.answer(signal, ["original-value"], "action-one")["state"], "submitted")
-                        sent = self.seen(signal)
-                        self.assertEqual((sent["panel"], sent["fleet"], sent["counted"]), ("sent", "sent", False))
-                        ended = self.end(signal, ending)
-                        self.assertEqual(self.carry(signal), None, "the pass retires the ended duty, sends nothing")
-                        self.assert_standing_again(signal, ended)
-                        completion = self.assert_arrives_once(signal, second, "action-two")
-                        self.assertEqual(completion["answer"], second[0])
-                        self.assertEqual(pending.read(self.f.root, signal["session_id"],
-                                                      ended["delivery_id"])["state"], ending)
+            for second in (["original-value"], ["other"]):   # the same answer, a different one
+                with self.fresh(harness=harness, second=second[0]):
+                    signal, _ = self.ask(harness, "a-%s-%s" % (harness, second[0]))
+                    self.assertEqual(self.answer(signal, ["original-value"], "action-one")["state"], "submitted")
+                    sent = self.seen(signal)
+                    self.assertEqual((sent["panel"], sent["fleet"], sent["counted"]), ("sent", "sent", False))
+                    ended = self.end(signal, "rejected")
+                    self.assertEqual(self.carry(signal), None, "the pass retires the ended duty, sends nothing")
+                    self.assert_standing_again(signal, ended)
+                    completion = self.assert_arrives_once(signal, second, "action-two")
+                    self.assertEqual(completion["answer"], second[0])
+                    self.assertEqual(pending.read(self.f.root, signal["session_id"],
+                                                  ended["delivery_id"])["state"], "rejected")
+
+    def test_an_operators_expiry_is_no_proof_of_a_miss_and_stays_sent_as_on_main(self):
+        # Review 1926, round 1, #4: the queue took the answer (`sent-ambiguous`), the operator's recovery expired that
+        # delivery, and the queued answer reached the session later. Releasing on `expired` opened the question again
+        # and the session got the answer twice; main gives it once. `expired` is not released, as on main.
+        for harness in HARNESSES:
+            for taken in (False, True):   # expired while still pending, or after the queue took it
+                with self.fresh(harness=harness, taken=taken):
+                    signal, _ = self.ask(harness, "expired-%s-%s" % (harness, taken))
+                    self.answer(signal, ["original-value"], "action-one")
+                    wire = self.carry(signal) if taken else None
+                    self.assertEqual(self.f.record(signal)["state"], "sent-ambiguous" if taken else "pending")
+                    ended = self.end(signal, "expired")
+                    self.assertIs(session_notice.release_undelivered_answer(ended), False)
+                    self.assertIsNone(self.carry(signal), "the pass retires the ended duty, sends nothing")
+                    seen = self.seen(signal)
+                    self.assertEqual((seen["panel"], seen["counted"]), ("sent", False))
+                    self.answer(signal, ["other"], "action-two")
+                    self.assertEqual((self.entry(signal)["state"], self.entry(signal)["action_id"]),
+                                     ("submitted", "action-one"), "no second answer is taken")
+                    self.assertEqual(self.f.record(signal)["delivery_id"], ended["delivery_id"])
+                    if taken:
+                        self.f.consume(signal, wire)   # the queued answer arrives late
+                        self.assertIsNone(self.carry(signal))
+                    self.assertEqual(len(self.sends), 1 if taken else 0, "the session gets the answer at most once")
+
+    def test_an_answer_record_that_cannot_be_read_keeps_the_duty_for_the_next_pass(self):
+        # Review 1926, round 1, #1: the pass that retired a refused delivery could not read the answer record; it
+        # closed the duty anyway and "sent" stayed for good. Now the duty stays open and the next pass releases it.
+        for harness in HARNESSES:
+            with self.fresh(harness=harness):
+                signal, _ = self.ask(harness, "unreadable-" + harness)
+                self.answer(signal, ["original-value"], "action-one")
+                ended = self.end(signal, "rejected")
+                cache, real, failed = waits._cache_path(), Path.read_text, []
+
+                def unreadable(path, *args, **kwargs):
+                    if path == cache:
+                        failed.append(path)
+                        raise OSError("fixture: the answer record cannot be read in this pass")
+                    return real(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", unreadable):
+                    self.assertEqual(self.carry(signal), "", "the duty stays; nothing is sent")
+                    self.assertIsNone(session_notice.release_undelivered_answer(ended))
+                self.assertTrue(failed)
+                open_duties = [duty["intent"]["delivery_id"]
+                               for duty in obligations.ObligationStore(self.f.root).list(kinds={"run-notice"})]
+                self.assertIn(ended["delivery_id"], open_duties)
+                self.assertEqual((self.entry(signal)["state"], self.entry(signal)["action_id"]),
+                                 ("submitted", "action-one"))
+                self.assertIsNone(self.carry(signal), "the next pass releases it and retires the duty")
+                self.assert_standing_again(signal, ended)
+                self.assert_arrives_once(signal, ["other"], "action-two")
+
+    def test_a_later_answer_does_not_depend_on_the_first_records_retention(self):
+        # Review 1926, round 1, #5: after the refused first record was pruned (7 days) only its prune mark stayed at the
+        # question's key, and the answer to the question that stood again ended `unknown` (`record-pruned`). The later
+        # answer now goes as its own delivery whether the first record was pruned before or after it was given; the
+        # prune mark stays, and the earlier answer is never made again.
+        import hashlib
+        for harness in HARNESSES:
+            for when in ("before", "after"):
+                with self.fresh(harness=harness, pruned=when + " the later answer"):
+                    signal, _ = self.ask(harness, "pruned-%s-%s" % (harness, when))
+                    self.answer(signal, ["original-value"], "action-one")
+                    old = self.f.record(signal)["receipt"]["answer_binding"]
+                    ended = self.end(signal, "rejected")
+                    self.assertIsNone(self.carry(signal))
+                    self.assert_standing_again(signal, ended)
+                    first = pending.record_path(self.f.root, signal["session_id"], ended["delivery_id"])
+                    key = "question-answer:" + signal["id"]
+                    later = "delivery-" + hashlib.sha256(("notice\0%s\0action-two" % key).encode()).hexdigest()
+
+                    def prune():
+                        pending.prune_bounded(self.f.root, now=time.time() + pending.TERMINAL_RETENTION_SECONDS + 86400)
+                        self.assertFalse(first.exists())
+                        self.assertTrue(pending.tombstone_path(first).exists())
+
+                    def observe_again():
+                        if when == "before":
+                            prune()
+                        record = self.f.record(signal)
+                        self.assertEqual(record["delivery_id"], later)
+                        binding = record["receipt"]["answer_binding"]
+                        options = dict(key=key, subject="Question answer", required_action="read-question-answer",
+                                       exact_text=True, jobs=self.f.jobs)
+                        again = session_notice.notify(harness, signal["session_id"], answer_binding=binding,
+                                                      text=waits.message_answer_body(binding), **options)
+                        self.assertEqual(again["delivery_id"], later, "the same answer is the same delivery")
+                        with self.assertRaises(ValueError):
+                            session_notice.notify(harness, signal["session_id"], answer_binding=old,
+                                                  text="original-value", **options)
+                        self.assertFalse(first.exists(), "the earlier answer is never made again")
+                        self.assertTrue(pending.tombstone_path(first).exists(), "its prune mark stays")
+                    if when == "after":
+                        prune()
+                    completion = self.assert_arrives_once(signal, ["other"], "action-two", between=observe_again)
+                    self.assertEqual(completion["answer"], "other")
+
+    def test_a_managed_codex_watcher_leaves_answers_to_the_peer_courier(self):
+        # Review 1926, round 1, #6 (main's first answer too): with an app-server queue, the managed watcher took an
+        # answer's delivery, queued only its private marker and settled it `acked`; the answer stayed `submitted` and
+        # its body never reached the session. Answers now go by the peer courier only; other notices are unchanged.
+        import importlib.util
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("answer_undelivered_managed",
+                                                      ROOT / "utilities/codex-managed-completion.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        for case in ("first answer", "answer again"):
+            with self.fresh(case=case):
+                sid = "managed-" + case.split()[0]
+                queued = []
+                args = SimpleNamespace(queue_socket=self.f.root / "app-server.sock", jobs=self.f.jobs,
+                                       parent_session_id=sid, sealed_batch_id="", interval=0.1, control_socket=None)
+                watcher = module.NoticeWatcher(args, set(), capability=None)
+
+                def send(_socket, **kwargs):
+                    queued.append(kwargs["message"])
+                    return {"status": "consumed", "queued_submission_id": "queued-fixture"}
+
+                def watch():
+                    with mock.patch.object(module, "queue_target", return_value=sid), \
+                            mock.patch.object(module.codex_queue_delivery, "send_at_least_once", side_effect=send), \
+                            mock.patch.object(module.codex_queue_delivery, "_known_consumed", return_value=None), \
+                            mock.patch.object(module.codex_queue_delivery, "list_queue", return_value=[]):
+                        for path, storage in watcher._candidate_paths():
+                            watcher._one(path, storage_key=storage)
+                signal, _ = self.ask("codex", sid)
+                if case == "answer again":
+                    self.answer(signal, ["original-value"], "action-one")
+                    watch()
+                    ended = self.end(signal, "rejected")
+                    self.assertIsNone(self.carry(signal))
+                    self.assert_standing_again(signal, ended)
+                completion = self.assert_arrives_once(signal, ["other"], "action-two", between=watch)
+                self.assertEqual(completion["answer"], "other")
+                self.assertIn("other", self.last_body)
+                self.assertEqual(queued, [], "the watcher queued nothing for the answer")
+                note = session_notice.notify("codex", sid, key="fixture-notice:" + case, subject="fixture",
+                                             text="an ordinary notice", jobs=self.f.jobs)
+                watch()
+                self.assertEqual([text.splitlines()[0] for text in queued], ["fixture: an ordinary notice "
+                                                                            "(required_action=read-notice)"])
+                self.assertEqual(pending.read(self.f.root, sid, note["delivery_id"])["state"], "acked")
 
     # -- B: an older release's courier ends a new-shaped answer ---------------------------------
 
@@ -196,15 +354,17 @@ class AnswerUndeliveredTest(unittest.TestCase):
                 wire = self.carry(signal)
                 record = self.f.record(signal)
                 self.assertEqual(record["state"], "sent-ambiguous")
-                self.assertFalse(session_notice.release_undelivered_answer(record))
-                self.carry(signal)
+                self.assertIs(session_notice.release_undelivered_answer(record), False)
+                with mock.patch.object(session_notice, "notice_is_current", return_value=False):
+                    self.carry(signal)   # a courier refuses only a delivery it has not handed over
+                self.assertEqual(self.f.record(signal)["state"], "sent-ambiguous")
                 self.assertEqual((self.entry(signal)["state"], self.seen(signal)["panel"]), ("submitted", "sent"))
                 # then taken: acked and applied
                 self.f.consume(signal, wire)
                 record = self.f.record(signal)
                 self.assertEqual((record["state"], self.entry(signal)["state"]), ("acked", "applied"))
-                self.assertFalse(session_notice.release_undelivered_answer(record))
-                self.assertFalse(session_notice.release_undelivered_answer(dict(record, state="rejected")))
+                self.assertIs(session_notice.release_undelivered_answer(record), False)
+                self.assertIs(session_notice.release_undelivered_answer(dict(record, state="rejected")), False)
                 self.assertEqual(self.entry(signal)["state"], "applied")
                 self.assertEqual(self.source(signal)["lifecycle"], "answered")
             with self.fresh(harness=harness, case="received"):
@@ -214,7 +374,7 @@ class AnswerUndeliveredTest(unittest.TestCase):
                 self.assertTrue(waits._store_selected_entry(envelope, dict(
                     entry, state="received", result={"transport": "received", "status": "received"})))
                 ended = self.end(signal, "rejected")
-                self.assertFalse(session_notice.release_undelivered_answer(ended))
+                self.assertIs(session_notice.release_undelivered_answer(ended), False)
                 self.assertIsNone(self.carry(signal))
                 self.assertEqual((self.entry(signal)["state"], self.entry(signal)["action_id"]),
                                  ("received", "action-one"))
@@ -237,7 +397,7 @@ class AnswerUndeliveredTest(unittest.TestCase):
                                       lease_seconds=30, require_generation_proof=False, jobs=self.f.jobs)
                 ended_note = pending.reject_claimed(self.f.root, "same-" + harness, claim["delivery_id"],
                                                     claim_owner="fixture", reason="fixture")
-                self.assertFalse(session_notice.release_undelivered_answer(ended_note))
+                self.assertIs(session_notice.release_undelivered_answer(ended_note), False)
                 ended = self.end(signal, "rejected")
                 self.assertIsNone(self.carry(signal))
                 self.assert_standing_again(signal, ended)
@@ -254,7 +414,7 @@ class AnswerUndeliveredTest(unittest.TestCase):
                 signal, _ = self.f.ask(harness, "secret-" + harness, "Synthetic secret?", secret=True)
                 self.assertTrue(waits._refresh_cache())
                 self.answer(signal, ["SECRET-ANSWER-SENTINEL"], "action-one")
-                ended = self.end(signal, "expired")
+                ended = self.end(signal, "rejected")
                 self.assertIsNone(self.carry(signal))
                 seen = self.assert_standing_again(signal, ended)
                 for shown in (json.dumps(seen["row"]), seen["listing"],
@@ -278,13 +438,14 @@ class AnswerUndeliveredTest(unittest.TestCase):
                 signal, _ = self.ask(harness, "twice-" + harness)
                 self.answer(signal, ["original-value"], "action-one")
                 ended = self.end(signal, "rejected")
-                self.assertTrue(session_notice.release_undelivered_answer(ended))
-                self.assertFalse(session_notice.release_undelivered_answer(ended))
+                self.assertIs(session_notice.release_undelivered_answer(ended), True)
+                self.assertIs(session_notice.release_undelivered_answer(ended), False)
                 self.assertIsNone(self.carry(signal))     # the restarted courier reads it again
                 self.assertIsNone(self.carry(signal))
                 self.assert_standing_again(signal, ended)
                 self.assertEqual(self.answer(signal, ["other"], "action-two")["state"], "submitted")
-                self.assertFalse(session_notice.release_undelivered_answer(ended), "the old record never ends a later answer")
+                self.assertIs(session_notice.release_undelivered_answer(ended), False,
+                              "the old record never ends a later answer")
                 self.assertEqual((self.entry(signal)["state"], self.entry(signal)["action_id"]),
                                  ("submitted", "action-two"))
 
