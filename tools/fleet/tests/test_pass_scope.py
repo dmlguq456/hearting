@@ -142,7 +142,7 @@ class GenerationReuseTest(unittest.TestCase):
 
 
 
-class UnchangedTagSnapshotTest(unittest.TestCase):
+class TagSnapshotTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -156,28 +156,21 @@ class UnchangedTagSnapshotTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_identical_census_keeps_the_file_and_marks_only_its_generation(self):
+    def test_identical_census_reaffirms_only_the_observed_row(self):
+        start = procscan.read_proc_start(os.getpid())
         session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
-                          pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
-        session_tags.assign([session])
-        path = session_tags._path()
-        before_bytes, before = path.read_bytes(), os.stat(path)
-        time.sleep(0.01)
-        session_tags.assign([session])
-        after = os.stat(path)
-        self.assertEqual(path.read_bytes(), before_bytes)
-        self.assertEqual(after.st_ino, before.st_ino)
-        self.assertGreater(after.st_mtime_ns, before.st_mtime_ns)
-        self.assertFalse(list(path.parent.glob(".tag-assignments-*")))
-        tag = session_tags.assigned_tag("codex", "sid-unchanged")
-        self.assertIsNotNone(tag)
-        # A real change still rewrites the snapshot.
-        other = Session(harness="opencode", session_id="sid-new", started_at=11,
-                        pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
+                          pid=os.getpid(), proc_start=start)
+        other = Session(harness="opencode", session_id="sid-carried", started_at=11,
+                        pid=os.getpid(), proc_start=start)
         session_tags.assign([session, other])
-        rows = json.loads(path.read_text())["assignments"]
-        self.assertEqual({row["session_id"] for row in rows}, {"sid-unchanged", "sid-new"})
-        self.assertEqual(session_tags.assigned_tag("codex", "sid-unchanged"), tag)
+        path = session_tags._path()
+        before, inode = session_tags._read(path), path.stat().st_ino
+        self.assertIn(("opencode", "sid-carried"), before)
+        session_tags.assign([session])
+        before[("codex", "sid-unchanged")]["observation_revision"] += 1
+        self.assertEqual(session_tags._read(path), before)
+        self.assertNotEqual(path.stat().st_ino, inode)
+        self.assertFalse(list(path.parent.glob(".tag-assignments-*")))
 
     def test_only_the_passive_fleet_passes_open_a_collection_pass(self):
         """A pass is one snapshot (what it memoizes is a display input, not what a carrier, hook,
@@ -205,17 +198,17 @@ class UnchangedTagSnapshotTest(unittest.TestCase):
         self.assertTrue(_opens_a_pass("with pass_scope.collection_pass():\n    pass\n"))
         self.assertTrue(_opens_a_pass("from m import collection_pass\nwith collection_pass():\n    pass\n"))
 
-    def test_a_failed_generation_mark_falls_back_to_the_rewrite(self):
+    def test_census_without_observations_keeps_the_snapshot(self):
         session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
                           pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
         session_tags.assign([session])
         path = session_tags._path()
-        before = os.stat(path)
-        with mock.patch.object(session_tags.os, "utime", side_effect=PermissionError("fixture")):
-            session_tags.assign([session])
-        after = os.stat(path)
-        self.assertNotEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns),
-                            "the reaffirmation must still mark a newer generation")
+        content, before = path.read_bytes(), path.stat()
+        session_tags.assign([])
+        after = path.stat()
+        self.assertEqual(path.read_bytes(), content)
+        self.assertEqual((after.st_ino, after.st_mtime_ns, after.st_ctime_ns),
+                         (before.st_ino, before.st_mtime_ns, before.st_ctime_ns))
 
 
 if __name__ == "__main__":
