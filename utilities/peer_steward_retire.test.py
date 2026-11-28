@@ -256,10 +256,15 @@ class GridStartTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_process_session", return_value=None), \
              mock.patch.object(peer_steward, "_read_screen", return_value=None), \
              mock.patch.object(peer_steward, "_pane_is_managed", return_value=False), \
+             mock.patch.object(terminal_surface, "tidy_panes", return_value=terminal_surface.TidyResult(
+                 "herdr", changed=True)) as tidied, \
              mock.patch("builtins.print") as printed:
             rc = peer_steward.main(["start", "grid", "--kind", "codex",
                                     "--beside", "w1:p0", "--cwd", str(self.tmp_root)])
         self.assertEqual(rc, 0, printed.call_args_list)
+        # The split's own tab is then arranged once by the shared tidy (its reads are tidy's).
+        self.assertEqual(tidied.call_args.kwargs["near"].pane, "w1:p0")
+        self.assertTrue(printed.call_args[0][0].endswith(" layout=tidied"), printed.call_args)
         splits = [a for a in calls if a[1:3] == ["pane", "split"]]
         self.assertEqual(len(splits), 1, calls)
         split = splits[0]
