@@ -466,6 +466,17 @@ class LegacyQuotaReasonTests(unittest.TestCase):
                     self.assertEqual(held, {"until_epoch": self.now + 3600, "label": "unknown-reset"})
                     self.assertIsNone(Q.harness_hold(self.jobs, harness, now=self.now + 3600, env=self.env))
 
+    def test_a_legacy_reset_label_with_a_space_names_the_moment_without_spaces(self):
+        self.row("claude", "dead-usage-limit", reset="11 pm")
+        state = Q.usage_states(self.jobs, now=self.now, env=self.env)["claude"]
+        self.assertTrue(state.startswith("limited("), state)
+        self.assertEqual(len(state.split()), 1, state)
+
+    def test_a_legacy_reset_label_without_a_space_keeps_its_label(self):
+        self.row("claude", "dead-usage-limit", reset="11pm")
+        self.assertEqual(Q.usage_states(self.jobs, now=self.now, env=self.env)["claude"],
+                         "limited(11pm)")
+
     def test_explicit_reset_and_pass_capacity_meaning_are_preserved(self):
         reset = datetime.fromtimestamp(self.now + 120, timezone.utc).isoformat().replace("+00:00", "Z")
         self.row("opencode", "dead-usage-limit", reset=reset)

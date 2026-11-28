@@ -2320,6 +2320,26 @@ class AutomaticDirectionTest(StartBase):
         with mock.patch.object(W, "_proposal_rows", return_value=rows):
             self.assertIsNone(self.automatic())
 
+    def test_a_harmless_read_note_does_not_keep_the_person_asked(self):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        for note in ("card-copy-kept", "kept:1", "blocks:2", "section-8-heading-missing"):
+            with self.subTest(note=note):
+                rows[0]["read_notes"] = [note]
+                with mock.patch.object(W, "_proposal_rows", return_value=rows):
+                    self.assertIsNotNone(self.automatic())
+
+    def test_an_unknown_read_note_keeps_the_person_asked(self):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        rows[0]["read_notes"] = ["some-new-cut:1"]
+        with mock.patch.object(W, "_proposal_rows", return_value=rows):
+            self.assertIsNone(self.automatic())
+
     def test_equal_proposals_with_nothing_to_choose_get_a_valid_runtime_interview(self):
         self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT], questions="none"))
         interview, answers = self.automatic()

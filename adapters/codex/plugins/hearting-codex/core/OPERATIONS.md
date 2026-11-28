@@ -2887,7 +2887,7 @@ The default remains off; Codex keeps native queue delivery.
 | Who talks with the user? | any dispatch depth 0 session: main, peer or steward (elsewhere also "supervisor"). |
 | Who runs the route? | its dispatch depth 1 `owner`, which coordinates dispatch depth 2 stages. |
 | Who keeps the owner alive and carries its input and results? | the runtime supervisor, a process rather than a session (§5.10a, §5.12). |
-| Who receives the result now? | the single `effective_parent`: the registered parent, or the last confirmed same-seat successor after a handover. |
+| Who receives the result now? | the single `effective_parent`: the registered parent, or the last confirmed same-seat successor after a handover, or the session a `request --route` handed that resting route to (its next turns register there). |
 | Who only observes? | a `watch` holder (Fleet ⚑ shows the steward relation); observation settles no stage result (S3). |
 | Who approves? | the person; the session that received the answer writes the release/approval record (S5). |
 | Who may perform parent-only route actions? | `route_authority.owns`: only the current `effective_parent` (the registered parent before handover); sending `correct` is not parent-only (§5.10a). |
@@ -3741,8 +3741,20 @@ the detail in a file and give its path.
 **Peer requests.** A request for work is `peer-steward.py request <address> --body-file
 <file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws
 it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
-`show [<rq-id>]` prints the sealed body (no id: this session's open requests). The line
-that reaches a conversation names the request; the body stays sealed and the model opens
+`show [<rq-id>]` prints the sealed body (no id: this session's open requests).
+`request <address> --route <route-id>` (repeatable: one stream at a time) also hands routes
+the sender holds to that session: their completions, attention notices and
+`start`/`correct`/`close` move to the receiver, the sender keeps its questions, requests,
+steward flag and every other route, and the runtime appends each handed route's recorded
+facts to the body. A route is handed over after a round has ended and its result was read:
+only a one-step route its holder could `correct` now moves (closed on a PASS, nothing
+running, waiting to start or still being delivered), and only to a session proven live on the
+same harness that has not held it. Anything else is refused with nothing sent or recorded,
+and the line ends with `hint=` saying what to do instead (for a running route: after this
+round ends). When the route moved but the request could not be sent, the line ends
+`note=undelivered` (send the text again with a plain `request`) or `note=queued ref=<ref>`
+(the request is still on its way).
+The line that reaches a conversation names the request; the body stays sealed and the model opens
 it with `show`. Delivery and work are separate: a receipt does not change a request's state;
 only a final or reject report, or the requester's cancel, closes it, and a partial report
 keeps it open. A report belongs to the revision it answers; for a superseded one it is
