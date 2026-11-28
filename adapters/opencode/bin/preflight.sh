@@ -239,9 +239,10 @@ opencode_runtime_projection_check() {
     printf 'check=failed\nreason=opencode-native-commands-missing\nopencode_home=%s\nexpected=%s|%s\n' "$opencode_home" "$opencode_home/commands/autopilot-code.md" "$opencode_home/command/autopilot-code.md"
     return 69
   fi
-  if ! python3 - "$ROOT" "$harness" "$opencode_home" <<'PY'
+  if ! python3 - "$SELF_REAL" "$harness" "$opencode_home" <<'PY'
 import os, pathlib, re, sys
-sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "tools/install"))
+# The checking code ships beside this script; this home's root below is only data for it.
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parents[3] / "tools/install"))
 import projector, runtime_activation
 home = pathlib.Path(sys.argv[3])
 state = projector.opencode_activation(home)
@@ -263,8 +264,8 @@ for filename in scan:
 # The agent part of the judgment `runtime status` makes: every agent file the plan for this home
 # expects is in place and readable, not a broken link (a plan whose models.conf withholds every agent
 # expects none). A home no activation recorded (a source install) needs a readable definition the
-# installer links (in agent/, or the agents/ folder OpenCode also reads), unless its models.conf
-# withholds every agent the same way.
+# installer links (in agent/, or agents/ and its per-agent folder, which OpenCode also reads), unless
+# the renderer projects nothing for it because its models.conf withholds every agent the same way.
 agents = []
 try:
     if state.get("mode"):
@@ -277,10 +278,11 @@ try:
     else:
         os.environ["AGENT_HOME"] = str(root)  # the installer's projection from this home's own root
         if not any((home / folder / pathlib.Path(e["dest"]).name).is_file()
-                   for e in projector.plan(["opencode"])["opencode"] for folder in ("agent", "agents")
-                   if pathlib.Path(e.get("dest", "")).parent == home / "agent"):
-            runtime_activation._native_agent_entries("opencode", root, home)  # the renderer's plan, for the policy
-            if not runtime_activation._agents_withheld_by_policy("opencode", root, home):
+                   for e in projector.plan(["opencode"])["opencode"]
+                   if pathlib.Path(e.get("dest", "")).parent == home / "agent"
+                   for folder in ("agent", "agents", "agents/" + pathlib.Path(e["dest"]).stem)):
+            if (runtime_activation._native_agent_entries("opencode", root, home)[0]  # the renderer's plan
+                    or not runtime_activation._agents_withheld_by_policy("opencode", root, home)):
                 agents.append("no agent definition where the installer links them")
 except (KeyError, runtime_activation.ActivationError) as exc:
     agents.append(str(exc))

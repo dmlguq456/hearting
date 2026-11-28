@@ -3424,16 +3424,47 @@ class NativeAgentRenderTest(unittest.TestCase):
     def lines(self, report):
         return "\n".join(report.get("report_lines", []))
 
-    def opencode_preflight(self):
+    def opencode_preflight(self, agent_home=REPO_ROOT, script=REPO_ROOT / "adapters/opencode/bin/preflight.sh"):
         """`preflight.sh headless --check` against this home, with a stand-in `opencode` on PATH."""
         stub = self.root / "bin" / "opencode"
         stub.parent.mkdir(parents=True, exist_ok=True)
         stub.write_text("#!/bin/sh\necho 2.0.32\n", encoding="utf-8")
         stub.chmod(0o755)
         env = {**os.environ, "PATH": f"{stub.parent}{os.pathsep}{os.environ.get('PATH', '')}",
-               "AGENT_HOME": str(REPO_ROOT)}
-        return subprocess.run(["sh", str(REPO_ROOT / "adapters/opencode/bin/preflight.sh"), "headless", "--check",
+               "AGENT_HOME": str(agent_home)}
+        return subprocess.run(["sh", str(script), "headless", "--check",
                                str(REPO_ROOT)], env=env, capture_output=True, text=True, timeout=600)
+
+    # main before memory-scout retired: an older source that still ships its unpinned definition, and whose
+    # runtime_activation has no `_agents_withheld_by_policy`.
+    OLDER_SOURCE = "0ea6458b3"
+
+    def older_source(self):
+        """A copy of that main, made once per class from the checkout's history."""
+        cls = type(self)
+        if getattr(cls, "_older_source", None) is None:
+            archive = subprocess.run(["git", "-C", str(REPO_ROOT), "archive", self.OLDER_SOURCE], capture_output=True)
+            if archive.returncode != 0:
+                self.skipTest(f"needs commit {self.OLDER_SOURCE} in the checkout's history")
+            temporary = tempfile.TemporaryDirectory()
+            cls.addClassCleanup(temporary.cleanup)
+            subprocess.run(["tar", "-x", "-C", temporary.name], input=archive.stdout, check=True)
+            cls._older_source = Path(temporary.name)
+        return cls._older_source
+
+    def source_install(self, source):
+        """The v1 source installer from `source` (it records no activation); returns its agent/ links."""
+        import drivers.opencode as source_installer
+        version = mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "1.19.0"})  # its v1 guard file
+        version.start()
+        self.addCleanup(version.stop)
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(source)}):
+            self.assertFalse(source_installer.install()["blocked"])
+        home = self.home("opencode")
+        self.assertFalse((home / ".harness/activation.json").exists())
+        installed = sorted((home / "agent").glob("*.md"))
+        self.assertTrue(installed)
+        return installed
 
     # -- T1 / T6: the verify condition ---------------------------------------
     def test_all_three_adapters_follow_the_user_models_and_never_touch_shipped_files(self):
@@ -3562,18 +3593,24 @@ class NativeAgentRenderTest(unittest.TestCase):
 
     def test_a_blank_or_broken_catalog_is_not_an_empty_surface_by_policy(self):
         # No valid name, or a malformed entry, withholds nothing (review R2 🔴2): refresh fails and keeps
-        # the definitions it had.
+        # the definitions it had and its record. A malformed entry beside a valid name whose model is
+        # withheld does not count either (review R3 🟡2).
         for runtime in ("codex", "claude", "opencode"):
             activation.activate(runtime, "linked", str(REPO_ROOT))
             directory = self.home(runtime) / "agents"
             before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            record = activation._state_path(runtime).read_bytes()
             self.assertIn(f"deep{self.EXT[runtime]}", before)
-            for catalog in (" ", "broken-token"):
-                with self.subTest(runtime=runtime, catalog=catalog):
-                    self.write_conf(runtime, {"CFG_NATIVE_AGENT_CATALOG": catalog})
+            light = " ".join(self.shipped_models(runtime, ("CFG_TIER_LIGHT_MODEL",)))
+            for edits in ({"CFG_NATIVE_AGENT_CATALOG": " "}, {"CFG_NATIVE_AGENT_CATALOG": "broken-token"},
+                          {"CFG_NATIVE_AGENT_CATALOG": "light:light broken-token",
+                           "CFG_MAIN_SESSION_ONLY_MODELS": light}):
+                with self.subTest(runtime=runtime, **edits):
+                    self.write_conf(runtime, edits)
                     with self.assertRaisesRegex(activation.ActivationError, "activation surfaces: agent"):
                         activation.refresh(runtime)
                     self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+                    self.assertEqual(activation._state_path(runtime).read_bytes(), record)
 
     # -- T3a: an empty agent surface is not the policy's unless the plan says so (review 🔴2) ------
     def test_a_plan_that_lost_its_rows_or_a_home_that_lost_its_files_is_not_fresh(self):
@@ -3615,15 +3652,7 @@ class NativeAgentRenderTest(unittest.TestCase):
     def test_a_source_install_with_no_activation_record_needs_its_agent_definitions(self):
         # The v1 source installer records no activation (review R2 🔴3): the preflight still needs a
         # readable definition where it links them, unless the selected models.conf withholds every agent.
-        import drivers.opencode as source_installer
-        version = mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "1.19.0"})  # its v1 guard file
-        version.start()
-        self.addCleanup(version.stop)
-        self.assertFalse(source_installer.install()["blocked"])
-        home = self.home("opencode")
-        self.assertFalse((home / ".harness/activation.json").exists())
-        installed = sorted((home / "agent").glob("*.md"))
-        self.assertTrue(installed)
+        installed = self.source_install(REPO_ROOT)
         check = self.opencode_preflight()
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         for path in installed:
@@ -3635,6 +3664,69 @@ class NativeAgentRenderTest(unittest.TestCase):
         self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
         check = self.opencode_preflight()
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_an_older_source_whose_renderer_still_projects_a_definition_needs_it(self):
+        # Beside the case above: the policy excuses a lost definition only when the renderer projects none
+        # (review R3 🔴2). main's renderer still projects the unpinned memory-scout no models.conf withholds,
+        # so with every catalog model withheld the home that lost it fails as it did on main, whichever of
+        # the two sources the caller's AGENT_HOME names.
+        older = self.older_source()
+        installed = self.source_install(older)
+        self.assertIn("memory-scout.md", [path.name for path in installed])
+        for path in installed:
+            # destructive-ok: reason=simulate an older source install that lost its agent links; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
+        for agent_home in (REPO_ROOT, older):
+            with self.subTest(agent_home=str(agent_home)):
+                check = self.opencode_preflight(agent_home=agent_home)
+                self.assertEqual(check.returncode, 69, check.stdout + check.stderr)
+                self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+
+    def test_the_check_runs_its_own_code_whatever_source_the_caller_names(self):
+        # The checking code ships with the script (review R3 🔴3); the home's source is only its data. A caller
+        # whose AGENT_HOME names main, whose runtime_activation predates the policy helper, still gets the
+        # judgment and its reason, through the script or the installer's link into this source.
+        installed = self.source_install(REPO_ROOT)
+        for path in installed:
+            # destructive-ok: reason=simulate a source install whose models.conf withholds every agent; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        older = self.older_source()
+        entry = self.home("opencode") / "hearting/adapters/opencode/bin/preflight.sh"
+        self.assertTrue(entry.is_file())
+        for script in (REPO_ROOT / "adapters/opencode/bin/preflight.sh", entry):
+            with self.subTest(script=str(script)):
+                self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
+                check = self.opencode_preflight(agent_home=older, script=script)
+                self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+                self.assertIn("check=ok", check.stdout)
+                self.write_conf("opencode")
+                check = self.opencode_preflight(agent_home=older, script=script)
+                self.assertEqual(check.returncode, 69, check.stdout + check.stderr)
+                self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+                self.assertNotIn("Traceback", check.stderr)
+
+    def nested_definition_only(self, source, leaf):
+        # main's preflight also took agents/<stem>/<leaf> (review R3 🔴1): a live definition there alone passes.
+        installed = self.source_install(source)
+        home = self.home("opencode")
+        kept = home / "agent" / leaf
+        self.assertIn(kept, installed)
+        nested = home / "agents" / kept.stem / leaf
+        nested.parent.mkdir(parents=True)
+        nested.symlink_to(kept.resolve())
+        for path in installed:
+            # destructive-ok: reason=leave only the nested definition of a source install; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        self.assertTrue(nested.is_file())
+        check = self.opencode_preflight()
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_an_older_source_install_keeps_its_definition_in_the_per_agent_folder(self):
+        self.nested_definition_only(self.older_source(), "memory-scout.md")
+
+    def test_a_source_install_keeps_its_definition_in_the_per_agent_folder(self):
+        self.nested_definition_only(REPO_ROOT, "light.md")
 
     # -- T3b: catalog entries removed from the selected config ---------------
     def test_catalog_entries_missing_from_the_selected_config_leave_no_definition(self):
