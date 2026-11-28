@@ -397,6 +397,29 @@ class OtherDecisionTest(Homes):
         self.register("claude", {"matcher": "*", "hooks": ours("claude")["hooks"]})
         self.assertFalse(self.sole("claude", "Agent"))
 
+    def test_a_handler_s_own_if_on_the_subagent_tool_still_decides(self):
+        # Claude runs a handler with `if` (one permission rule) only where the rule matches the call, so under a
+        # group on every tool it decides this call when the rule names the subagent tool or cannot be read as one
+        # tool name; a rule on another tool never runs for this call.
+        for rule, sole in (("Agent(Explore)", False), ("Task", False), (" Agent (x)", False), ("*", False),
+                           ("", False), (7, False), ("Bash(rm *)", True), ("mcp__notes__save", True)):
+            with self.subTest(rule=rule):
+                self.register("claude", {"matcher": "*", "hooks": [{**self.REFUSE, "if": rule}]})
+                self.assertEqual(self.sole("claude", "Agent"), sole)
+        for rule, sole in (("spawn_agent", False), ("Agent(x)", False), ("Bash(x)", True)):
+            with self.subTest(codex=rule):
+                self.register("codex", {"hooks": [{**self.REFUSE, "if": rule}]})
+                self.assertEqual(self.sole("codex", "spawn_agent"), sole)
+
+    def test_a_pattern_a_number_a_list_or_a_broken_regex_still_decides(self):
+        # Only none, "" and `*` are every tool; any other matcher that may pick the call counts.
+        for matcher in (".*", 0, ["Agent"], "["):
+            with self.subTest(matcher=matcher):
+                self.register("claude", {"matcher": matcher, "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("claude", "Agent"))
+                self.register("codex", {"matcher": matcher, "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("codex", "spawn_agent"))
+
     def test_our_hook_is_known_by_its_exact_command(self):
         # A command that only contains the hook's file name is another hook (a wrapper that may refuse).
         group = ours("claude")
