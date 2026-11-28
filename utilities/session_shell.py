@@ -410,7 +410,9 @@ SCREEN_LARGE = "shell-screen-large"            # too large a screen for one answ
 def screen_lines(screen):
     """``(lines, "")`` for a screen the host sent, as ``(char, faint)`` cell rows, else ``(None, why)``.
 
-    The host sends every native row, each up to its last non-blank cell; the judgments read it whole."""
+    The host sends every native row, each up to its last non-blank cell; the judgments read it whole.
+    A run the host drew in reverse video (a TUI's cursor block) is ``[text, dim, true]`` and its
+    cells ``(char, faint, True)``; an older host sends ``[text, dim]`` only, with no such evidence."""
     if not isinstance(screen, list):
         return None, "screen-unavailable"
     rows = []
@@ -419,10 +421,10 @@ def screen_lines(screen):
             return None, "screen-unavailable"
         line = []
         for run in runs:
-            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
-                    or type(run[1]) is not bool):
+            if (not isinstance(run, list) or len(run) not in (2, 3) or not isinstance(run[0], str)
+                    or type(run[1]) is not bool or run[2:] not in ([], [True])):
                 return None, "screen-unavailable"
-            line.extend((char, run[1]) for char in run[0])
+            line.extend(((char, run[1], True) if run[2:] else (char, run[1])) for char in run[0])
         rows.append(line)
     return rows, ""
 

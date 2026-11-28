@@ -2706,6 +2706,10 @@
    "en": "the session is still in a turn or waiting for an answer; run the same retire again once it is idle",
    "ko": "세션이 아직 일하는 중이거나 답을 기다립니다. 쉬는 상태가 되면 같은 retire를 다시 부르세요"
   },
+  "retire.wait.turn-unknown": {
+   "en": "the session's state could not be read, so it is not known to be idle and no key was sent; run the same retire again once it shows idle, or close the window by hand if that session is finished",
+   "ko": "세션 상태를 읽지 못해 쉬는 중인지 알 수 없어 아무 키도 보내지 않았습니다. 쉬는 상태가 보이면 같은 retire를 다시 부르고, 끝난 세션이면 창을 직접 닫으세요"
+  },
   "retire.wait.work": {
    "en": "work registered on that window is still open; run the same retire again after it settles",
    "ko": "그 창에 맡긴 일이 아직 열려 있습니다. 그 일이 끝난 뒤 같은 retire를 다시 부르세요"

@@ -13,6 +13,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -23,6 +24,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
 import session_shell
+from fixtures.session_shell_rig import AnswerReachesIdleShellTest, ShellRig  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("fresh_seat_fixture",
     ROOT / "utilities/peer_wrapped_foreground.test.py")
@@ -30,6 +32,8 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 peer = fixture.peer
 REAL_SCREEN_READY = peer._screen_ready
+REAL_PANE_READINESS = peer._pane_readiness
+REAL_READ_SCREEN = peer._read_screen
 UNSELECTED = "-"
 OTHER_SID = "01000000-0000-7000-8000-000000000009"
 RULE = "─" * 24
@@ -58,7 +62,8 @@ class SeatBase(unittest.TestCase):
 
 
 def shell_lines(*rows):
-    """Native cells as the shell host sends them (``[text, faint]`` runs per row)."""
+    """Native cells as the shell host sends them (``[text, faint]`` runs per row, a reverse-video
+    run ``[text, faint, true]``)."""
     lines, why = session_shell.screen_lines([list(map(list, row)) for row in rows])
     assert lines is not None, why
     return lines
@@ -151,33 +156,110 @@ class FreshSeatRetireTest(SeatBase):
 
 
 class SuggestionComposerTest(SeatBase):
-    """Claude draws an empty composer's suggestion faint with the cursor block on its first letter."""
+    """Claude draws an empty composer's suggestion faint with the cursor block on its first letter.
+
+    That bright first cell is left out only when the reader shows the cursor on it
+    (reverse video); review 11-28 (PR #1933): without that evidence a person's bright
+    typed letter beside a faint cursor or completion read as an empty box."""
 
     SUGGESTION_ANSI = "❯\xa0\x1b[7mT\x1b[27m\x1b[2mry \"fix lint errors\"\x1b[22m\r\n" + RULE + "\r\n"
+    # name: (herdr ANSI input line, shell host runs, `_screen_ready`)
+    SCREENS = {
+        "cursor-on-the-suggestion": ("❯ \x1b[7mT\x1b[27m\x1b[2mry \"fix lint errors\"\x1b[22m",
+                                     [("❯ ", False), ("T", False, True), ('ry "fix lint errors"', True)], None),
+        "typed-letter-then-faint-reverse-cursor": (
+            "❯ T\x1b[2;7mr\x1b[27my \"fix lint errors\"\x1b[22m",
+            [("❯ T", False), ("r", True, True), ('y "fix lint errors"', True)], "draft"),
+        "typed-text-then-a-blank-cursor": ("❯ Try\x1b[7m \x1b[27m",
+                                           [("❯ Try", False), (" ", False, True)], "draft"),
+        "typed-letter-blank-cursor-faint-rest": ("❯ T\x1b[7m \x1b[27m\x1b[2mry\x1b[22m",
+                                                 [("❯ T", False), (" ", False, True), ("ry", True)], "draft"),
+        "cursor-on-a-typed-first-letter": ("❯ \x1b[7mT\x1b[27mry this",
+                                           [("❯ ", False), ("T", False, True), ("ry this", False)], "draft"),
+        "bright-after-the-faint-run": ("❯ \x1b[7mT\x1b[27m\x1b[2mry\x1b[22m now",
+                                       [("❯ ", False), ("T", False, True), ("ry", True), (" now", False)], "draft"),
+        "gap-before-the-faint-run": ("❯ \x1b[7mT\x1b[27m \x1b[2msuggestion\x1b[22m",
+                                     [("❯ ", False), ("T", False, True), (" ", False), ("suggestion", True)], "draft"),
+        "truecolor-typed-text": ("❯ \x1b[38;2;255;255;255mTyped draft\x1b[0m",
+                                 [("❯ Typed draft", False)], "draft"),
+        "truecolor-two-operand": ("❯ \x1b[38;2;2;136;136mTyped draft\x1b[0m",
+                                  [("❯ Typed draft", False)], "draft"),
+    }
 
     def setUp(self):
         super().setUp()
         mock.patch.object(peer, "_screen_ready", REAL_SCREEN_READY).start()
 
+    def herdr_lines(self, line):
+        return peer._screen_lines(line + "\r\n" + RULE + "\r\n")
+
+    def host_lines(self, runs):
+        return shell_lines(runs, [(RULE, False)])
+
     def suggestion_lines(self):
-        return shell_lines([("❯ T", False), ('ry "fix lint errors"', True)], [(RULE, False)])
+        return self.host_lines(self.SCREENS["cursor-on-the-suggestion"][1])
 
-    def test_the_suggestion_is_an_empty_composer_from_herdr_and_from_the_shell_host(self):
-        self.assertIsNone(REAL_SCREEN_READY("claude", peer._screen_lines(self.SUGGESTION_ANSI)))
-        self.assertIsNone(REAL_SCREEN_READY("claude", self.suggestion_lines()))
-
-    def test_typed_text_beside_a_suggestion_is_still_a_draft(self):
-        drafts = {
-            "one-typed-letter": [[("❯ T", False)], [(RULE, False)]],
-            "typed-then-faint-ghost": [[("❯ Try", False), (' "fix"', True)], [(RULE, False)]],
-            "cursor-after-typed-letter": [[("❯ Tr", False), ('y "fix"', True)], [(RULE, False)]],
-            "bright-after-the-faint-run": [[("❯ T", False), ("ry", True), (" now", False)], [(RULE, False)]],
-            "gap-before-the-faint-run": [[("❯ a ", False), ("suggestion", True)], [(RULE, False)]],
-            "second-line": [[("❯ T", False), ("ry", True)], [("  more", False)], [(RULE, False)]],
-        }
-        for name, rows in drafts.items():
+    def test_both_readers_agree_on_each_cursor_screen(self):
+        for name, (ansi, runs, expected) in self.SCREENS.items():
             with self.subTest(case=name):
-                self.assertEqual(REAL_SCREEN_READY("claude", shell_lines(*rows)), "draft")
+                self.assertEqual(REAL_SCREEN_READY("claude", self.herdr_lines(ansi)), expected)
+                self.assertEqual(REAL_SCREEN_READY("claude", self.host_lines(runs)), expected)
+        self.assertIsNone(REAL_SCREEN_READY("claude", peer._screen_lines(self.SUGGESTION_ANSI)))
+        # A second line before the box closes is a draft's, whatever the first line shows.
+        second = [("❯ ", False), ("T", False, True), ("ry", True)]
+        self.assertEqual(REAL_SCREEN_READY("claude", shell_lines(second, [("  more", False)], [(RULE, False)])),
+                         "draft")
+
+    def test_an_older_host_without_cursor_evidence_keeps_the_draft(self):
+        # Two-value runs carry no reverse video: the bright first letter may be typed.
+        older = self.host_lines([("❯ T", False), ('ry "fix lint errors"', True)])
+        self.assertEqual(REAL_SCREEN_READY("claude", older), "draft")
+        self.assertEqual(session_shell.screen_lines([[["T", False, False]]]), (None, "screen-unavailable"))
+        self.assertEqual(session_shell.screen_lines([[["T", False, True, True]]]), (None, "screen-unavailable"))
+
+    def test_the_stored_claude_screens_keep_their_judgment(self):
+        rule = "─" * 40
+        stored = {
+            "CLAUDE_EMPTY": ("\x1b[0m\x1b[38;2;80;80;80m❯ \x1b[0m\x1b[38;2;255;255;255m[earlier message]\x1b[0m\n\n"
+                             + rule + "\n❯ \r\n" + rule + "\n  \U0001f4c1 proj │ main\n  bypass permissions on\n", None),
+            "CLAUDE_SUGGESTION": ("❯ earlier\n\n" + rule + "\n❯ \x1b[2mrun the tests again\x1b[0m\n" + rule
+                                  + "\n  footer\n", None),
+            "CLAUDE_DRAFT": ("❯ earlier\n\n" + rule + "\n❯ half typed text\n" + rule + "\n  footer\n", "draft"),
+            "CLAUDE_DRAFT_SECOND_LINE": (rule + "\n❯ \x1b[2m\x1b[0m\n  second line of a draft\n" + rule
+                                         + "\n  footer\n", "draft"),
+        }
+        for name, (raw, expected) in stored.items():
+            with self.subTest(screen=name):
+                self.assertEqual(REAL_SCREEN_READY("claude", peer._screen_lines(raw)), expected)
+
+    def test_retire_continue_and_delivery_read_the_same_judgment(self):
+        cases = {name: (runs, expected) for name, (_ansi, runs, expected) in self.SCREENS.items()}
+        cases["older-host-format"] = ([("❯ T", False), ('ry "fix lint errors"', True)], "draft")
+        for name, (runs, expected) in cases.items():
+            with self.subTest(case=name):
+                lines = self.host_lines(runs)
+                # retire
+                self.select("claude")
+                with mock.patch.object(peer, "_read_screen", return_value=lines):
+                    rc, output = self.retire()
+                if expected is None:
+                    self.assertIn("retired=true reason=normal-exit", output)
+                else:
+                    self.assertEqual(self.actions, [])
+                    self.assertIn(f"reason={expected}", output)
+                # continue
+                with mock.patch.object(peer, "_read_screen_reason", return_value=(lines, "")):
+                    self.assertEqual(peer._continue_composer_reason(self.pane, "claude"), expected)
+                # an answer or message delivered through the shell seat
+                binding = self.publish("claude")
+                record = {"pid": binding["native_pid"], "procStart": binding["native_start"],
+                          "sessionId": binding["sid"], "status": "idle"}
+                with mock.patch("fleet.session_registry.read", return_value=record), \
+                     mock.patch.object(session_shell, "valid_binding", return_value=True):
+                    answer = session_shell._input_readiness(
+                        binding, {"screen": [list(map(list, row)) for row in (runs, [(RULE, False)])],
+                                  "state": "idle"})
+                self.assertEqual((answer["ready"], answer["reason"]), (expected is None, expected))
 
     def test_public_retire_exits_a_seat_showing_only_the_suggestion(self):
         self.select("claude")
@@ -233,11 +315,200 @@ class PendingWaitLineTest(SeatBase):
             with self.subTest(reason=reason):
                 self.assertIn(word, peer._retire_wait_detail(reason).lower())
 
+    def test_an_unread_state_is_told_apart_from_a_known_turn(self):
+        unknown = peer._retire_wait_detail("agent-unknown-herdr-corroboration")
+        self.assertEqual(unknown, peer._retire_wait_detail("native-turn-unknown"))
+        self.assertNotEqual(unknown, peer._retire_wait_detail("agent-working-herdr-corroboration"))
+        self.assertNotEqual(unknown, peer._retire_wait_detail("native-turn-busy"))
+        self.assertIn("state", unknown.lower())
+
     def test_a_finished_retire_has_no_release_line(self):
         self.select("claude")
         rc, output = self.retire()
         self.assertEqual(rc, 0)
         self.assertNotIn("detail=", output)
+
+
+EXITS = {"claude": [("send-text", "/exit"), ("send-keys", "enter")],
+         "codex": [("send-keys", "ctrl+d")], "opencode": [("send-keys", "ctrl+d")]}
+CODEX_EMPTY = ("recap line\n\n\n\x1b[1m\u203a\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n"
+               "  proj \u00b7 master \u00b7 Context 85% used\n")
+
+
+class RealSeatBase(SeatBase):
+    """An unselected seat retired through the real readiness projection: no `ready` stand-in.
+
+    Review 11-28 (PR #1933): the shared fixture's readiness answered `ready`, so the
+    real projection's refusal of an `unknown` turn (`pane-identity-unverified`) went unseen."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = "unknown"
+        mock.patch.object(peer, "_retire_target", side_effect=lambda *a, **k:
+                          (self.state, dict(self.ident), 0, None)).start()
+        mock.patch.object(peer, "_pane_readiness", REAL_PANE_READINESS).start()
+
+    def fresh(self, harness):
+        self.select(harness)
+        self.publish(harness, sid=UNSELECTED)
+        self.ident["session_id"] = UNSELECTED
+        self.current_sid = None
+        self.state, self.host_state, self.host_sid, self.host_screen = "unknown", "unknown", None, None
+
+    def retire_as(self, target):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            rc = peer.cmd_retire(SimpleNamespace(target=target, _resume_request_id=None))
+        return rc, output.getvalue()
+
+
+class RealReadinessTest(RealSeatBase):
+    def test_the_command_retires_an_unselected_seat_on_every_adapter(self):
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.fresh(harness)
+                rc, output = self.retire()
+                self.assertEqual(rc, 0, output)
+                self.assertIn("retired=true reason=normal-exit", output)
+                self.assertEqual(self.actions, EXITS[harness] + [("close", self.pane)])
+
+    def test_the_runner_resumes_an_unselected_seat_on_every_adapter(self):
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.fresh(harness)
+                self.screen_reason = "draft"
+                _rc, output = self.retire()
+                self.assertIn("reason=draft", output)
+                self.assertEqual(self.actions, [])
+                self.screen_reason = None
+                duty = self.store.list()[0]
+                with contextlib.redirect_stdout(io.StringIO()) as resumed:
+                    peer._resume_retire_obligation(duty, self.store)
+                self.assertIn("retired=true reason=normal-exit", resumed.getvalue())
+                self.assertEqual(self.actions, EXITS[harness] + [("close", self.pane)])
+                self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+
+    def test_only_the_booked_unselected_seat_in_its_own_shell_birth_has_no_turn(self):
+        self.fresh("codex")
+        booked = peer._retire_foreground(self.pane, "codex")
+        self.assertEqual(booked["attachment"]["sid"], UNSELECTED)
+
+        def readiness(seat, ident=None):
+            observed = dict(self.ident, **(ident or {}))
+            with mock.patch.object(peer, "_retire_target", return_value=("unknown", observed, 0, None)):
+                return REAL_PANE_READINESS(self.pane, "unknown", expected_harness="codex",
+                                           expected_sid=observed["session_id"], unselected_seat=seat)
+        self.assertEqual(readiness(booked).state, "ready")
+        self.assertNotEqual(readiness(None).state, "ready")
+        self.assertNotEqual(readiness(booked, {"session_id": OTHER_SID}).state, "ready")
+        self.assertNotEqual(readiness({**booked, "attachment": {**booked["attachment"], "sid": OTHER_SID}}).state,
+                            "ready")
+        self.assertNotEqual(readiness({**booked, "shell_start": "1"}).state, "ready")
+        # Registered work bound to the pane's processes is still read for such a seat.
+        with mock.patch.object(peer.peer_obligations, "execution_attempts_for_processes",
+                               return_value=("att-bound",)), \
+             mock.patch.object(peer.peer_obligations, "bound_work_for_pane",
+                               return_value=((), "unknown")) as bound:
+            self.assertNotEqual(readiness(booked).state, "ready")
+        bound.assert_called_once()
+
+
+class LastLookTest(RealSeatBase):
+    """A first prompt that lands after the last screen read starts no exit (review 🔴2).
+
+    The host selects the seat at once on the prompt's start hook and records the
+    attachment only after (host.cjs `source('register')` on `setImmediate`)."""
+
+    def test_input_after_the_last_screen_read_sends_no_key_and_leaves_the_duty_waiting(self):
+        arrivals = {
+            "turn-shows": lambda: setattr(self, "state", "working"),
+            "host-selected-before-its-record": lambda: setattr(self, "host_sid", OTHER_SID),
+            "host-turn": lambda: setattr(self, "host_state", "working"),
+        }
+        for name, arrive in arrivals.items():
+            for harness in ("codex", "claude", "opencode"):
+                with self.subTest(case=name, harness=harness):
+                    self.fresh(harness)
+
+                    def screen(*_a, **_k):
+                        arrive()
+                        return ["synthetic composer"]
+                    with mock.patch.object(peer, "_read_screen", side_effect=screen):
+                        _rc, output = self.retire()
+                    self.assertEqual(self.actions, [], output)
+                    self.assertIn("pending=true", output)
+                    observation = self.store.list()[0]["observation"]
+                    self.assertEqual((observation["phase"], observation["keys_sent"]), ("waiting", 0))
+                    # Nothing was requested: the same retire looks again instead of
+                    # answering `retire-already-pending`.
+                    self.state, self.host_sid, self.host_state = "unknown", None, "unknown"
+                    rc, output = self.retire()
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(self.actions, EXITS[harness] + [("close", self.pane)])
+
+    def test_a_stop_after_a_sent_key_keeps_the_exit_requested_with_its_count(self):
+        self.fresh("claude")
+        self.after_text = lambda: self.publish("claude", sid=UNSELECTED, incarnation="b" * 32)
+        _rc, output = self.retire()
+        self.assertEqual(self.actions, [("send-text", "/exit")])
+        self.assertIn("reason=foreground-changed", output)
+        observation = self.store.list()[0]["observation"]
+        self.assertEqual((observation["phase"], observation["keys_sent"]), ("exit-requested", 1))
+
+
+class NamedTargetScreenTest(RealSeatBase):
+    """Screen and wait reason come from the booked pane and attachment (review 🔴3)."""
+
+    def test_an_open_shell_editor_waits_alike_by_name_and_by_pane(self):
+        real_run = subprocess.run
+
+        def herdr(argv, *args, **kwargs):
+            if argv[:1] == ["herdr"] and "read" in argv:  # the framed pane, read whole
+                return subprocess.CompletedProcess(argv, 0, stdout=CODEX_EMPTY, stderr="")
+            return real_run(argv, *args, **kwargs)
+        for target in (self.pane, "probe-cx"):
+            with self.subTest(target=target), \
+                 mock.patch.object(peer, "_read_screen", REAL_READ_SCREEN), \
+                 mock.patch.object(peer, "_screen_ready", REAL_SCREEN_READY), \
+                 mock.patch.object(peer, "_retire_pane_info", side_effect=lambda pane, *a, **k:
+                                   self.process_info() if pane == self.pane else None), \
+                 mock.patch.object(peer.subprocess, "run", side_effect=herdr):
+                self.fresh("codex")
+                for other in set(session_shell.HARNESSES) - {"codex"}:  # one seat per pane, as in use
+                    session_shell.binding_path(other, self.host["pid"]).unlink(missing_ok=True)
+                self.host_screen = {"ok": True, "focused": True, "screen": [], "state": "unknown"}
+                _rc, output = self.retire_as(target)
+                self.assertEqual(self.actions, [], output)
+                self.assertIn("reason=shell-editor-open", output)
+
+
+class HostCursorEvidenceTest(AnswerReachesIdleShellTest):
+    """The real shell host carries the cursor block as reverse video (host.cjs screenSnapshot).
+
+    A private host in a private PTY with the rig's synthetic Claude native, which paints
+    its composer's suggestion as given; no model, account or user pane is used."""
+    ENTRY = ROOT / "utilities/session-shell/entry.py"
+    SUGGEST = {
+        "cursor-on-the-suggestion": ("\x1b[22m\x1b[7mT\x1b[27m\x1b[2mry \"fix lint errors\"", None),
+        "typed-letter-then-faint-reverse-cursor": ("\x1b[22mT\x1b[2;7mr\x1b[27my \"fix lint errors\"", "draft"),
+    }
+
+    def test_the_host_screen_shows_where_the_cursor_is(self):
+        for name, (suggest, expected) in self.SUGGEST.items():
+            with self.subTest(case=name):
+                rig = ShellRig(self, self.ENTRY, name, "claude", env={"ARI_NATIVE_SUGGEST": suggest},
+                               size=(60, 240 + 42))
+                try:
+                    rig.start(idle=False)
+                    rig.wait_for(b"fix lint errors", "the suggestion never painted")
+                    screen = session_shell.control(rig.current_binding(), "screen")
+                    self.assertTrue(screen.get("ok"), screen)
+                    reversed_runs = [run for row in screen["screen"] for run in row if run[2:] == [True]]
+                    self.assertEqual([run[0] for run in reversed_runs], ["T" if expected is None else "r"])
+                    lines, why = session_shell.native_screen_reason(rig.current_binding())
+                    self.assertEqual(why, "")
+                    self.assertEqual(REAL_SCREEN_READY("claude", lines), expected)
+                finally:
+                    rig.stop()
 
 
 if __name__ == "__main__":

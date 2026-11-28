@@ -2997,10 +2997,10 @@ A repeated watch and rearm restore the existing target relation without creating
 another watch. Taking the role also fills in this session's pending watches.
 Their next-action directive uses the same supported wake carrier as the first
 arm. An unresolved target remains visible as unknown in the steward check.
-A target whose own window `start` recorded (pane and server) is no longer listed
-once a complete census of that server confirms the pane is gone and the session is
-not live elsewhere; an entry recorded before the server was kept reads the default
-server, and a tmux pane or an unanswered census keeps it listed.
+A target whose own window `start`, `watch` or `wait` recorded (pane and the server it
+was seen on) is no longer listed once a complete census of that server, read on that
+server alone, confirms the pane is gone and the session is not live elsewhere; an
+entry with no recorded server, a tmux pane or an unanswered census keeps it listed.
 Workflow status joins the route's registered owner and its exact liveness,
 including the first running stage before any stage completion journal entry.
 This is a read-only projection and does not turn process liveness into completion.
@@ -3186,8 +3186,9 @@ its own newly split pane only when the same shell is agent-free and its visible
 screen is unchanged from the stable snapshot recorded before native start.
 Retirement protects busy sessions, open forms, drafts, unknown process identity
 and unconfirmed shell return; it sends no repeated exit, forced kill or forced
-close. Claude's own faint composer suggestion (`Try "…"`, the cursor block on its
-first letter) is an empty input, not a draft. A pending result ends its line with
+close. Claude's own faint composer suggestion (`Try "…"`) is an empty input, not a
+draft, only when the screen shows the cursor block (reverse video) on its bright first
+letter; without that evidence (an older shell host) the line stays a draft. A pending result ends its line with
 one `detail=` saying what releases it (send or clear the draft, answer the dialog,
 wait for the turn, close a window whose agent could not be confirmed); it names no
 new command or step. The same runner completes delayed Claude background-work confirmation
@@ -3795,8 +3796,13 @@ effect recheck that same attachment and native selection. A seat whose native ha
 not taken its first prompt has no selected session (`-`) on every adapter: its
 attachment record and births are its identity, its `unknown` turn is no turn (the
 first prompt's start hook selects a session and so changes the booked attachment),
-and the empty composer and form checks still decide. A native that proves a session
-the attachment does not name stays unverified. A returned shell and
+and the empty composer and form checks still decide. The readiness projection, the
+command and the retained runner read that same booked seat; the screen and the wait
+reason are read on the booked pane and attachment, so a name and a pane id wait alike.
+Right before the first key the host is asked again for the booked attachment: a turn
+or a selection that arrived meanwhile sends nothing and the request waits again,
+while a stop after a sent key keeps the exit requested with the keys sent. A native
+that proves a session the attachment does not name stays unverified. A returned shell and
 the original native lifetime's exit still govern cleanup, independently of
 wrapper process names or foreground process counts.
 An owned retire request without a recorded native lifetime can settle as

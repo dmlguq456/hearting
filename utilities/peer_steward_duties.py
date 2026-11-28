@@ -1093,17 +1093,19 @@ def _marker_remainder(cells, marker):
     offset = len(text) - len(stripped) + len(marker)
     rest = cells[offset:]
     body = _plain(rest).strip()
-    return body, any((not faint) and ch.strip() for ch, faint in rest)
+    return body, any((not cell[1]) and cell[0].strip() for cell in rest)
 
 
 def _claude_suggestion(cells):
     """Whether a Claude input line holds only its own faint suggestion (`Try "…"`).
 
-    An empty composer draws the suggestion faint, with the cursor block (reverse
-    video, not faint) on its first letter: one bright cell right after the marker,
-    then faint text with no gap and nothing bright after it. Typed text is bright
-    throughout, so a typed letter with a faint completion after it has its cursor
-    on a second bright cell and stays a draft."""
+    An empty composer draws the suggestion faint, with the cursor block on its first
+    letter: one bright cell right after the marker, then faint text with no gap and
+    nothing bright after it. That bright cell is left out only when the reader shows
+    the cursor on it (a reverse-video cell, ``(char, faint, True)``); typed text is
+    bright too, so without that evidence, or with the cursor anywhere else (on a
+    faint cell, after the text), the line stays a draft. A reader that carries no
+    cursor evidence (an older shell host's ``[text, dim]`` runs) keeps the draft."""
     text = _plain(cells)
     start = len(text) - len(text.lstrip()) + 1
     rest = list(cells[start:])
@@ -1111,9 +1113,10 @@ def _claude_suggestion(cells):
         rest.pop(0)
     while rest and not rest[-1][0].strip():
         rest.pop()
-    if len(rest) < 2 or rest[0][1] or not rest[0][0].strip() or not rest[1][1] or not rest[1][0].strip():
+    if (len(rest) < 2 or rest[0][1] or not rest[0][0].strip() or rest[0][2:3] != (True,)
+            or not rest[1][1] or not rest[1][0].strip()):
         return False
-    return all(faint or not ch.strip() for ch, faint in rest[1:])
+    return all(cell[1] or not cell[0].strip() for cell in rest[1:])
 
 
 def _draft_state(harness, lines):

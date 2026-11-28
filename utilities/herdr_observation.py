@@ -42,6 +42,28 @@ def endpoint_name(session: str | None = None) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else "default"
 
 
+def endpoint_env(session: str | None, environ=None) -> dict:
+    """An environment whose ``herdr`` calls reach ``session``'s server alone.
+
+    Herdr follows an inherited ``HERDR_SOCKET_PATH`` or ``HERDR_SESSION`` before its
+    default server, so a call meant for one server from a pane of another would read
+    that other one. Its socket stays only while its ``HERDR_SESSION`` owner is the
+    selected server; another server's ``HERDR_SESSION`` is dropped."""
+    selected = endpoint_name(session or "default")
+    env = dict(os.environ if environ is None else environ)
+    if (env.get("HERDR_SESSION") or "default") != selected:
+        env.pop("HERDR_SOCKET_PATH", None)
+    if selected == "default":
+        env.pop("AGENT_HERDR_SESSION", None)
+        if env.get("HERDR_SESSION") not in {None, "", "default"}:
+            env.pop("HERDR_SESSION", None)
+    else:
+        env["AGENT_HERDR_SESSION"] = selected
+        if env.get("HERDR_SESSION") not in {None, "", selected}:
+            env.pop("HERDR_SESSION", None)
+    return env
+
+
 @dataclass(frozen=True)
 class PaneCensus:
     endpoint: str
@@ -53,7 +75,10 @@ class PaneCensus:
 def pane_census(*, session: str | None = None,
                 runner: Callable = subprocess.run,
                 which: Callable = shutil.which) -> PaneCensus | None:
-    """Read one complete ``herdr pane list`` result; return None on uncertainty."""
+    """Read one complete ``herdr pane list`` result; return None on uncertainty.
+
+    A named ``session`` (``"default"`` too) is read on that server alone, so the census's
+    endpoint is the server it actually read; without one the caller's own server is."""
     if which("herdr") is None:
         return None
     server = endpoint_name(session)
@@ -61,8 +86,9 @@ def pane_census(*, session: str | None = None,
     if server != "default":
         argv.extend(("--session", server))
     argv.extend(("pane", "list"))
+    bound = {} if session is None else {"env": endpoint_env(server)}
     try:
-        proc = runner(argv, capture_output=True, text=True, timeout=2.0)
+        proc = runner(argv, capture_output=True, text=True, timeout=2.0, **bound)
         if getattr(proc, "returncode", 1) != 0:
             return None
         payload = json.loads(proc.stdout or "")

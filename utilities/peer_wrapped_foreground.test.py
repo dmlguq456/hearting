@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
 import pane_ownership as po
 import peer_steward_base as base
+import session_shell
 import session_tidy as tidy
 import session_tidy_runner as tidy_runner
 
@@ -80,6 +81,25 @@ class WrappedForegroundTest(unittest.TestCase):
         mock.patch.object(peer, "_mark_completed_retire_followup").start()
         mock.patch.object(peer, "_run_herdr_wait", return_value=None).start()
         mock.patch.object(peer.herdr_observation, "socket_path_for_endpoint", return_value=None).start()
+        # The seat's shell host answers `status` (and `screen`, when a test gives one) only
+        # for the attachment it holds now (host.cjs `exact`). A selection it took but has
+        # not recorded yet is `host_sid`.
+        self.host_sid, self.host_state, self.host_screen = None, "idle", None
+        real_control = session_shell.control
+
+        def host_control(binding, operation, **fields):
+            if operation != "status" and not (operation == "screen" and self.host_screen is not None):
+                return real_control(binding, operation, **fields)
+            keys = ("harness", "sid", "incarnation", "host_pid", "host_start", "native_pid", "native_start")
+            record = session_shell.read_binding(
+                session_shell.binding_path(binding["harness"], binding["host_pid"])) or {}
+            held = {**record, **({"sid": self.host_sid} if self.host_sid else {})}
+            if not record or any(binding.get(key) != held.get(key) for key in keys):
+                return {"ok": False, "reason": "attachment-changed", "not_started": True}
+            if operation == "screen":
+                return {**self.host_screen, **{key: held[key] for key in keys}}
+            return {"ok": True, "state": self.host_state, **{key: held[key] for key in keys}}
+        mock.patch.object(session_shell, "control", side_effect=host_control).start()
 
     def select(self, harness):
         self.harness = harness

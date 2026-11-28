@@ -676,13 +676,13 @@ def _observe_role(harness: str, session_id: str) -> dict:
 def _window_closed_target(target: dict, censuses: dict) -> bool:
     """Whether the target's own Herdr window is gone in a complete census of its server.
 
-    `start` records the pane it opened and that pane's server (Herdr pane ids repeat
-    across servers; an entry from before the server was recorded is on the default
-    one, where `start` opens unless told otherwise). A tmux pane, an unanswered or
-    incomplete census, or a pane still listed keeps the target. One census per server
-    per check."""
-    pane, server = target.get("pane"), target.get("server") or "default"
-    if not isinstance(pane, str) or not pane or pane.startswith("%") or not isinstance(server, str):
+    `start`, `watch` and `wait` record the pane they saw and that pane's server (Herdr
+    pane ids repeat across servers), and the census reads that server alone. An entry
+    with no recorded server, a tmux pane, an unanswered or incomplete census, or a pane
+    still listed keeps the target. One census per server per check."""
+    pane, server = target.get("pane"), target.get("server")
+    if (not isinstance(pane, str) or not pane or pane.startswith("%")
+            or not isinstance(server, str) or not server):
         return False
     if server.startswith("tmux:"):
         return False

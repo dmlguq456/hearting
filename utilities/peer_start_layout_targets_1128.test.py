@@ -245,9 +245,98 @@ class ClosedWindowTargetTest(_Isolated):
             with self.subTest(case=name):
                 self.assertEqual(self.observe([target], census)[0], ["x"])
 
-    def test_an_entry_from_before_the_server_was_recorded_reads_the_default_server(self):
+    def test_an_entry_with_no_recorded_server_stays_on_the_check(self):
+        # Review 11-28 (PR #1933): such an entry was read on the default server and a live
+        # window on another server was hidden. No server is guessed for it.
         names, calls, _seen = self.observe([self.started("old", "w1:p3")], self.census("w1:p1"))
-        self.assertEqual((names, calls), ([], ["default"]))
+        self.assertEqual((names, calls), (["old"], []))
+
+    def test_each_server_is_read_once_and_only_for_its_own_targets(self):
+        censuses = {"default": self.census("w1:p1"), "lab": self.census("w1:p3", endpoint="lab")}
+        targets = [self.started("on-default", "w1:p3", server="default"),
+                   self.started("on-lab", "w1:p3", server="lab"),
+                   self.started("gone-on-lab", "w1:p4", server="lab")]
+        collector = SimpleNamespace(
+            _peer_message_module=lambda: None, _registry_sessions=lambda: [],
+            role_targets=lambda *a, **k: [], unresolved_role_targets=lambda *a, **k: targets,
+            session_liveness=lambda *a, **k: "unknown")
+        calls = []
+        with mock.patch.object(SC, "_collector", return_value=collector), \
+             mock.patch.object(SC, "_end_observation", return_value=None), \
+             mock.patch.object(SC, "_session_liveness", REAL_SESSION_LIVENESS), \
+             mock.patch.object(SC, "_open_work", return_value=([], [])), \
+             mock.patch.object(herdr_observation, "pane_census",
+                               side_effect=lambda *, session=None, **k: calls.append(session) or censuses[session]), \
+             mock.patch("peer_steward_native.native_agent", return_value=None):
+            seen = REAL_OBSERVE("claude", "holder-sid")
+        self.assertEqual([t["name"] for t in seen["targets"]], ["on-lab"])
+        self.assertEqual(sorted(calls), ["default", "lab"])
+
+
+class BoundCensusTest(unittest.TestCase):
+    """A census names the server it actually read (review 11-28, PR #1933)."""
+
+    def run_census(self, session, environ):
+        seen = {}
+
+        def runner(argv, **kwargs):
+            seen.update(argv=argv, env=kwargs.get("env"))
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"result": {"panes": []}}), stderr="")
+        with mock.patch.dict(os.environ, environ, clear=True):
+            census = herdr_observation.pane_census(session=session, runner=runner,
+                                                   which=lambda _name: "/usr/bin/herdr")
+        return census, seen
+
+    def test_a_default_census_from_a_pane_of_another_server_reads_the_default_one(self):
+        census, seen = self.run_census("default", {
+            "PATH": "/usr/bin", "HERDR_SESSION": "lab", "HERDR_SOCKET_PATH": "/run/lab.sock",
+            "AGENT_HERDR_SESSION": "lab"})
+        self.assertEqual(census.endpoint, "default")
+        self.assertEqual(seen["argv"], ["herdr", "pane", "list"])
+        self.assertFalse({"HERDR_SESSION", "HERDR_SOCKET_PATH", "AGENT_HERDR_SESSION"} & set(seen["env"]))
+
+    def test_a_named_census_keeps_only_that_servers_socket(self):
+        census, seen = self.run_census("lab", {"PATH": "/usr/bin", "HERDR_SOCKET_PATH": "/run/default.sock"})
+        self.assertEqual(census.endpoint, "lab")
+        self.assertEqual(seen["argv"], ["herdr", "--session", "lab", "pane", "list"])
+        self.assertNotIn("HERDR_SOCKET_PATH", seen["env"])
+        census, seen = self.run_census("lab", {"PATH": "/usr/bin", "HERDR_SESSION": "lab",
+                                               "HERDR_SOCKET_PATH": "/run/lab.sock"})
+        self.assertEqual(seen["env"]["HERDR_SOCKET_PATH"], "/run/lab.sock")
+
+    def test_the_callers_own_server_census_is_as_before(self):
+        _census, seen = self.run_census(None, {"PATH": "/usr/bin", "HERDR_SESSION": "lab"})
+        self.assertIsNone(seen["env"])
+
+
+class WatchKeepsTheStartServerTest(_Isolated):
+    """`start → watch` on one pane keeps the server the pane was seen on (review 11-28)."""
+
+    def test_a_watch_after_a_start_keeps_the_server(self):
+        message = peer.peer_message
+        with mock.patch.object(message, "_fleet_steward", return_value=None), \
+             mock.patch.object(message, "_has_explicit_self_entry", return_value=True), \
+             mock.patch.object(peer, "_print_steward_limited"):
+            path = message.steward_marker_path("codex", "holder-sid")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"schema_version": 2, "harness": "codex",
+                                        "session_id": "holder-sid", "targets": {}}))
+            message.grant_steward("codex", "holder-sid",
+                                  {"harness": "codex", "session_id": "target-sid", "name": "new",
+                                   "pane": "w1:p3", "server": "lab"},
+                                  "start", "2026-11-28T00:00:00Z", source="start")
+            peer._mark_observed("codex", "target-sid", "new", ("holder-sid", "codex"),
+                                pane="w1:p3", server="lab", steward_seat=None)
+        entry = json.loads(path.read_text())["targets"]["target-sid"]
+        self.assertEqual((entry["source"], entry["pane"], entry["server"]), ("watch", "w1:p3", "lab"))
+
+    def test_watch_and_wait_pass_the_server_they_read(self):
+        source = Path(peer.__file__).read_text()
+        for name in ("def cmd_wait", "def cmd_watch", "def _restore_watch_role"):
+            body = source.split(name, 1)[1].split("\ndef ", 1)[0]
+            with self.subTest(caller=name):
+                for call in body.split("_mark_observed(")[1:]:
+                    self.assertIn("server=", call.split(")\n", 1)[0])
 
 
 if __name__ == "__main__":
