@@ -2269,18 +2269,29 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
     spent. The owner cannot close the review itself, so each sentence leads to the one start command or to the end."""
     import review_round_cap as ROUND
     import worker_bootstrap
+    from route_form import one_shot_test_node
+    # The reviews come first; the test (from `strong`) is the missing node only once every review stands.
+    test = one_shot_test_node(route)
+    reviews = [node for node in reviews if test is None or node["id"] != test["id"]] or reviews
+    what = "independent test" if test is not None and reviews[0]["id"] == test["id"] else "independent review"
     # One command starts the whole review group (any member names it; the anchor is the first).
     anchor = reviews[0].get("parallel_anchor") or reviews[0]["id"]
     start = (f"`{worker_bootstrap.route_start_command(route_file, anchor, jobs=jobs)}` and yield "
              "runtime_wait: registered-children")
-    no_inline = "You cannot review your own work or close this review inline; do not report PASS without it."
+    no_inline = (f"You cannot {'test' if what == 'independent test' else 'review'} your own work or close this "
+                 f"{what.split()[-1]} inline; do not report PASS without it.")
+    if what == "independent test":
+        # What the test's handoff and its refused start say: an open FAIL, no round, running, or unreadable.
+        fields = worker_bootstrap.one_shot_test_followup(route, route_file, jobs)
+        if fields:
+            return worker_bootstrap.continuation_followup_text(fields)
     lineage = worker_bootstrap._lineage_rows(route, jobs)
     blocking, ran_without_verdict = [], False
     for review in reviews:
         rows = [(status, meta) for status, meta in lineage.get(review["id"], ())]
-        verdicts = [(status, meta) for status, meta in rows
-                    if ROUND.classify_round_row(status, meta, worker_type="review") == "verdict"]
-        if verdicts and ROUND.last_verdict_blocking(rows, "review"):
+        verdicts = [(status, meta) for status, meta in rows   # the test runs as a stage worker: its own type
+                    if ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or "review") == "verdict"]
+        if verdicts and ROUND.last_verdict_blocking(rows, "review") and what == "independent review":
             blocking.append((review, verdicts[-1][1]))
         elif rows and not verdicts:
             ran_without_verdict = True
@@ -2292,19 +2303,20 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
             return worker_bootstrap.continuation_followup_text(fixes if len(fixes) > 1 else fixes[0])
         return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
                 f"commit, then start it again with exactly: {start}. {no_inline}")
-    stale = [str(missing[review["id"]]).startswith("completion-review-source-stale") for review in reviews]
+    stale = [str(missing[review["id"]]).startswith(("completion-review-source-stale", "completion-test-source-stale"))
+             for review in reviews]
     if any(stale) and not all(stale):
         # Some legs of a group passed before the work changed and the rest gave no verdict or have not run.
-        return ("Part of your route's independent review passed but the work changed after it, and the rest ended "
-                "without a verdict or has not run. Commit your work, then start the review again with exactly: "
-                f"{start}. {no_inline}")
-    if any(stale):
-        return ("Your route's independent review passed, but the work changed after it. Commit your work, then start "
-                f"the review again with exactly: {start}. {no_inline}")
-    if ran_without_verdict:
-        return ("Your route's independent review ended without a verdict. Commit your work, then start it again with "
+        return (f"Part of your route's {what} passed but the work changed after it, and the rest ended "
+                f"without a verdict or has not run. Commit your work, then start the {what.split()[-1]} again with "
                 f"exactly: {start}. {no_inline}")
-    return ("Your route's independent review has not run. Commit your work, then start it with exactly: "
+    if any(stale):
+        return (f"Your route's {what} passed, but the work changed after it. Commit your work, then start "
+                f"the {what.split()[-1]} again with exactly: {start}. {no_inline}")
+    if ran_without_verdict:
+        return (f"Your route's {what} ended without a verdict. Commit your work, then start it again with "
+                f"exactly: {start}. {no_inline}")
+    return (f"Your route's {what} has not run. Commit your work, then start it with exactly: "
             f"{start}. {no_inline}")
 
 
